@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { LAMPORTS_PER_SOL, Transaction } from "@solana/web3.js";
@@ -180,7 +181,12 @@ export default function Home() {
             <div className="font-semibold">X1 Liquid Staking</div>
             <div className="text-xs text-zinc-500 uppercase tracking-wide">{ACTIVE_NETWORK}</div>
           </div>
-          <WalletButton />
+          <div className="flex items-center gap-4">
+            <Link href="/dashboard" className="text-sm text-zinc-400 hover:text-zinc-100">
+              Dashboard
+            </Link>
+            <WalletButton />
+          </div>
         </div>
       </header>
 

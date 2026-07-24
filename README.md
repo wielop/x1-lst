@@ -85,11 +85,32 @@ real cause.
 | Validator list | `BR2qMBYV399e27F872Pc2UzwGhRoj9X3GjgQC2GMu9YE` |
 
 Fees: 5% epoch fee, 0.2% stake/SOL withdrawal fee, 0% deposit fee (mirrors
-Ripper Pool's published fee schedule). 2 validators added for testing.
+Ripper Pool's published fee schedule). 4 validators added, selected by the
+methodology below (the top 4 of testnet's ~10 vote accounts pass every
+filter — the rest are either delinquent test nodes or negligible stake).
 
 Validated end-to-end on testnet: pool creation, `deposit-sol` → LST mint,
 `withdraw-sol` → LST burn, `add-validator`, `increase-validator-stake`
 (delegation confirmed active), and `update` across an epoch boundary.
+
+## Validator selection methodology
+
+`web/lib/validatorSelection.ts`, surfaced at `/api/validators` and on the
+`/dashboard` page. Approximates Ripper Pool's self-stake-percentile filter
+(which requires mining individual stake accounts per validator) using two
+cheap RPC calls — `getVoteAccounts` and `getClusterNodes` — instead:
+
+- drop delinquent validators
+- drop commission > 10%
+- drop activated stake < 1000 XNT (same floor Ripper uses)
+- drop validators whose latest-epoch vote credits are < 0.5x the field
+  median (a skip-rate proxy that doesn't require leader-schedule reconciliation)
+- drop validators not running one of the network's most common software versions
+
+Survivors are ranked by activated stake and capped at a configurable limit.
+This is a **read-only report** — actually adding a validator to the pool
+still requires the staker keypair and is done out-of-band via the CLI, never
+exposed through the deployed site.
 
 **Known issue, not ours to fix:** X1 testnet's public RPC
 (`rpc.testnet.x1.xyz`) is a proxy in front of multiple backend nodes with
@@ -115,7 +136,7 @@ live there). `lib/stake-pool/` is the JS client vendored from the matching
 ## Not done yet
 
 - Mainnet deployment (deliberately withheld pending further testnet review)
-- Production validator set (currently 2 test validators; needs a real
-  selection methodology, e.g. Ripper Pool's P85-percentile self-stake filter)
+- Running the validator selection methodology against the (much larger)
+  mainnet validator set before going live
 - Security review of the deployment/ops process (the program itself is the
   unmodified, previously-audited Solana Labs code)
