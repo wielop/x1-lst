@@ -37,9 +37,50 @@ export default function Architecture() {
       </ul>
       <p>
         Allocation metadata is read live from each underlying pool&apos;s own{" "}
-        <code>StakePool</code> account at <code>CreateLabel</code> time — never trusted from
+        <code>StakePool</code> account at <code>CreateLabel</code>{" "}
+        time — never trusted from
         client input — so a Label can point at any stake-pool-family deployment, including ones
         this project doesn&apos;t control.
+      </p>
+
+      <h3>Rebalance</h3>
+      <p>
+        Restricted to <code>vault_config.creator</code> — deliberately not a public,
+        anyone-can-call instruction like <code>spl-stake-pool</code>&apos;s own{" "}
+        <code>update</code>, since letting anyone trigger fund movement out of arbitrary pools
+        into others is a meaningfully bigger attack surface than letting anyone refresh balances.
+        For each allocation:
+      </p>
+      <ol>
+        <li>
+          Reads <code>total_lamports</code> / <code>pool_token_supply</code> (current exchange
+          rate) and <code>last_epoch_total_lamports</code> / <code>last_epoch_pool_token_supply</code>{" "}
+          (rate one epoch ago) straight off the pool&apos;s own <code>StakePool</code> account —
+          both already maintained by spl-stake-pool itself for its own epoch-fee accounting, so
+          no extra bookkeeping needed on our side.
+        </li>
+        <li>
+          Computes each allocation&apos;s last-epoch yield in basis points via cross-multiplication
+          (avoids an intermediate float and the rounding that comes with it), ranks them, and
+          assigns the winner <code>REBALANCE_WINNER_WEIGHT_BPS</code> (70%) — the rest split what
+          remains, proportional to their own (non-negative) yield.
+        </li>
+        <li>
+          Values each allocation at its current rate, diffs against the new target weight, and —
+          in the same instruction — CPIs <code>WithdrawSol</code> out of every now-over-target
+          allocation straight into the vault authority, then <code>DepositSol</code>{" "}
+          for whatever landed there into the under-target one. Two passes (all withdrawals, then
+          deposits) so
+          a later deposit can draw on lamports an earlier withdrawal just freed.
+        </li>
+        <li>Writes the new weights back into <code>vault_config</code>.</li>
+      </ol>
+      <p>
+        With <code>MAX_ALLOCATIONS</code> at 2 there&apos;s always exactly one winner and one
+        loser, so &quot;deposit whatever the withdrawals freed into the one under-target
+        allocation&quot; is exact. Past 2 allocations this would need to split the deposit side
+        across multiple under-target allocations proportionally too — not implemented, since
+        there&apos;s nothing to test it against yet.
       </p>
 
       <h3>Why label-vault uses spl-stake-pool as a Rust dependency</h3>

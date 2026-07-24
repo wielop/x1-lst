@@ -200,7 +200,10 @@ export default function LabelPage() {
 
         {config && (
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
-            <div className="text-xs text-zinc-500 mb-2">Basket composition</div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-zinc-500">Basket composition</div>
+              <div className="text-xs text-zinc-600">auto-rebalanced, not user-set</div>
+            </div>
             <div className="flex gap-2 flex-wrap">
               {config.allocations.map((a) => (
                 <span

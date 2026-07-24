@@ -115,18 +115,26 @@ function encodeCreateLabel(name: string, symbol: string, weightsBps: number[]): 
   return Buffer.concat(parts);
 }
 
-function encodeDeposit(lamportsIn: bigint): Buffer {
-  const buf = Buffer.alloc(9);
-  buf.writeUInt8(1, 0); // variant 1 = Deposit
-  buf.writeBigUInt64LE(lamportsIn, 1);
+// Buffer.prototype.writeBigUInt64LE isn't implemented by every browser build
+// of the `buffer` polyfill — DataView.setBigUint64 is standard Web API and
+// works regardless, so instruction encoding uses it instead of Buffer's
+// Node-style write methods.
+function u64LEBytes(value: bigint): Buffer {
+  const buf = Buffer.alloc(8);
+  new DataView(buf.buffer, buf.byteOffset, 8).setBigUint64(0, value, true);
   return buf;
 }
 
+function encodeDeposit(lamportsIn: bigint): Buffer {
+  return Buffer.concat([Buffer.from([1]), u64LEBytes(lamportsIn)]); // variant 1 = Deposit
+}
+
 function encodeWithdraw(labelTokensIn: bigint): Buffer {
-  const buf = Buffer.alloc(9);
-  buf.writeUInt8(2, 0); // variant 2 = Withdraw
-  buf.writeBigUInt64LE(labelTokensIn, 1);
-  return buf;
+  return Buffer.concat([Buffer.from([2]), u64LEBytes(labelTokensIn)]); // variant 2 = Withdraw
+}
+
+function encodeRebalance(): Buffer {
+  return Buffer.from([3]); // variant 3 = Rebalance, no extra data
 }
 
 /** Decodes a raw VaultConfig account buffer (see label-vault/program/src/state.rs). */
@@ -406,6 +414,56 @@ export async function buildWithdrawTransaction(
         programId: LABEL_VAULT_PROGRAM_ID,
         keys,
         data: encodeWithdraw(labelTokensIn),
+      }),
+    ],
+  };
+}
+
+/**
+ * Operator-only. Reads each allocation's last-epoch yield and actively moves
+ * capital toward the best performer (capped, see
+ * label-vault/program/src/state.rs::REBALANCE_WINNER_WEIGHT_BPS). Only the
+ * Label's creator can build a Rebalance that will actually be accepted —
+ * this is deliberately not exposed as a public "rebalance" button; run it
+ * from an operator script/cron instead.
+ */
+export async function buildRebalanceTransaction(
+  connection: Connection,
+  creator: PublicKey,
+  vaultConfigAddress: PublicKey,
+): Promise<{ instructions: TransactionInstruction[] }> {
+  const vaultConfig = await getVaultConfig(connection, vaultConfigAddress);
+  if (!vaultConfig) throw new Error("Label not found");
+  const [vaultAuthority] = findVaultAuthorityAddress(vaultConfig.labelMint);
+
+  const keys = [
+    { pubkey: creator, isSigner: true, isWritable: false },
+    { pubkey: vaultConfigAddress, isSigner: false, isWritable: true },
+    { pubkey: vaultAuthority, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: new PublicKey("SysvarC1ock11111111111111111111111111111111"), isSigner: false, isWritable: false },
+    { pubkey: new PublicKey("SysvarStakeHistory1111111111111111111111111"), isSigner: false, isWritable: false },
+    { pubkey: new PublicKey("Stake11111111111111111111111111111111111111"), isSigner: false, isWritable: false },
+  ];
+  for (const a of vaultConfig.allocations) {
+    keys.push(
+      { pubkey: a.poolProgramId, isSigner: false, isWritable: false },
+      { pubkey: a.poolAddress, isSigner: false, isWritable: true },
+      { pubkey: a.poolWithdrawAuthority, isSigner: false, isWritable: false },
+      { pubkey: a.reserveStake, isSigner: false, isWritable: true },
+      { pubkey: a.vaultTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: a.managerFeeAccount, isSigner: false, isWritable: true },
+      { pubkey: a.poolMint, isSigner: false, isWritable: true },
+    );
+  }
+
+  return {
+    instructions: [
+      new TransactionInstruction({
+        programId: LABEL_VAULT_PROGRAM_ID,
+        keys,
+        data: encodeRebalance(),
       }),
     ],
   };

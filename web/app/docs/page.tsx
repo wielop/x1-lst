@@ -13,13 +13,15 @@ export default function GettingStarted() {
       </p>
       <ol>
         <li>
-          <strong>A liquid staking pool</strong> — stake XNT, receive a token representing your
+          <strong>A liquid staking pool</strong>{" "}
+          — stake XNT, receive a token representing your
           share of stake delegated across multiple X1 validators, redeem it later for XNT plus
           rewards. Built on Solana Labs&apos; audited <code>spl-stake-pool</code> program, deployed
           under our own program ID.
         </li>
         <li>
-          <strong>Labels</strong> — user-created basket vaults. A Label splits a deposit across
+          <strong>Labels</strong>{" "}
+          — user-created basket vaults. A Label splits a deposit across
           several underlying LSTs by weight and mints one share token for the blended position,
           the same mechanism as{" "}
           <a href="https://clearsol.network" target="_blank" rel="noreferrer">

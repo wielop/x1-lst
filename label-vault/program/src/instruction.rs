@@ -92,6 +92,36 @@ pub enum VaultInstruction {
     ///     `[w]` Underlying pool's LST mint
     ///     `[w]` Withdrawer's wallet (destination for XNT)
     Withdraw { label_tokens_in: u64 },
+
+    /// Operator-only. Reads each allocation's last-epoch yield straight off
+    /// its `StakePool` account (`last_epoch_total_lamports` /
+    /// `last_epoch_pool_token_supply`, the same fields spl-stake-pool itself
+    /// maintains for its own epoch-fee accounting), picks the best performer,
+    /// and actively moves capital toward it (capped — see
+    /// `state::REBALANCE_WINNER_WEIGHT_BPS`) by CPI-ing `WithdrawSol` out of
+    /// the now-overweight allocation(s) into the vault authority, then
+    /// `DepositSol` from there into the now-underweight one(s). Stored
+    /// weights are updated to match.
+    ///
+    /// Accounts, in order:
+    ///   0. `[s]` Creator (must match `vault_config.creator`)
+    ///   1. `[w]` Vault config PDA
+    ///   2. `[w]` Vault authority PDA (holds transient lamports mid-rebalance)
+    ///   3. `[]` Token program
+    ///   4. `[]` System program
+    ///   5. `[]` Clock sysvar
+    ///   6. `[]` Stake history sysvar
+    ///   7. `[]` Stake program
+    ///   Then, for each allocation (7 accounts per allocation, in the order
+    ///   stored in the vault config):
+    ///     `[]`  Underlying pool's program (executable)
+    ///     `[w]` Underlying StakePool account
+    ///     `[]`  Underlying pool's withdraw authority
+    ///     `[w]` Underlying pool's reserve stake account
+    ///     `[w]` This vault's token account for that pool's LST
+    ///     `[w]` Underlying pool's manager fee account
+    ///     `[w]` Underlying pool's LST mint
+    Rebalance,
 }
 
 pub fn create_label(
@@ -211,5 +241,38 @@ pub fn withdraw(
         data: VaultInstruction::Withdraw { label_tokens_in }
             .try_to_vec()
             .unwrap(),
+    }
+}
+
+pub fn rebalance(
+    program_id: &Pubkey,
+    creator: &Pubkey,
+    vault_config: &Pubkey,
+    vault_authority: &Pubkey,
+    allocations: &[AllocationAccounts],
+) -> Instruction {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(*creator, true),
+        AccountMeta::new(*vault_config, false),
+        AccountMeta::new(*vault_authority, false),
+        AccountMeta::new_readonly(spl_token::id(), false),
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false),
+        AccountMeta::new_readonly(sysvar::stake_history::id(), false),
+        AccountMeta::new_readonly(solana_program::stake::program::id(), false),
+    ];
+    for a in allocations {
+        accounts.push(AccountMeta::new_readonly(a.pool_program_id, false));
+        accounts.push(AccountMeta::new(a.pool_address, false));
+        accounts.push(AccountMeta::new_readonly(a.pool_withdraw_authority, false));
+        accounts.push(AccountMeta::new(a.reserve_stake, false));
+        accounts.push(AccountMeta::new(a.vault_token_account, false));
+        accounts.push(AccountMeta::new(a.manager_fee_account, false));
+        accounts.push(AccountMeta::new(a.pool_mint, false));
+    }
+    Instruction {
+        program_id: *program_id,
+        accounts,
+        data: VaultInstruction::Rebalance.try_to_vec().unwrap(),
     }
 }

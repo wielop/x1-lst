@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
@@ -9,7 +9,17 @@ import { buildCreateLabelTransactions } from "@/lib/labelVault";
 import { AVAILABLE_POOLS } from "@/lib/labelVaultConfig";
 import { ACTIVE_NETWORK } from "@/lib/poolConfig";
 
-type Step = "metadata" | "allocations" | "review" | "done";
+type Step = "metadata" | "review" | "done";
+
+// Every included pool starts at an equal weight — the system takes it from
+// there. See /docs/create-a-label: weights aren't something you configure,
+// Rebalance shifts them toward whichever pool is actually yielding more,
+// each time the operator runs it.
+function equalWeights(n: number): number[] {
+  const base = Math.floor(10_000 / n);
+  const rem = 10_000 - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < rem ? 1 : 0));
+}
 
 export default function CreateLabel() {
   const { connection } = useConnection();
@@ -20,23 +30,9 @@ export default function CreateLabel() {
   const [symbol, setSymbol] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [weights, setWeights] = useState<number[]>(AVAILABLE_POOLS.map(() => 0));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resultMint, setResultMint] = useState<string | null>(null);
-
-  const weightSum = useMemo(() => weights.reduce((a, b) => a + b, 0), [weights]);
-
-  const setWeight = useCallback((i: number, pct: number) => {
-    setWeights((w) => w.map((v, idx) => (idx === i ? Math.max(0, Math.min(100, pct)) : v)));
-  }, []);
-
-  const splitEvenly = useCallback(() => {
-    const n = AVAILABLE_POOLS.length;
-    const base = Math.floor(100 / n);
-    const rem = 100 - base * n;
-    setWeights(AVAILABLE_POOLS.map((_, i) => base + (i < rem ? 1 : 0)));
-  }, []);
 
   const handleCreate = useCallback(async () => {
     if (!publicKey) {
@@ -46,10 +42,11 @@ export default function CreateLabel() {
     setBusy(true);
     setError(null);
     try {
+      const weights = equalWeights(AVAILABLE_POOLS.length);
       const allocationTargets = AVAILABLE_POOLS.map((p, i) => ({
         poolAddress: p.address,
-        weightBps: Math.round(weights[i] * 100),
-      })).filter((a) => a.weightBps > 0);
+        weightBps: weights[i],
+      }));
 
       const { setupInstructions, createLabelInstructions, signers, labelMint } =
         await buildCreateLabelTransactions(connection, publicKey, name, symbol, allocationTargets);
@@ -76,7 +73,7 @@ export default function CreateLabel() {
     } finally {
       setBusy(false);
     }
-  }, [connection, name, publicKey, sendTransaction, setVisible, symbol, weights]);
+  }, [connection, name, publicKey, sendTransaction, setVisible, symbol]);
 
   return (
     <div className="min-h-full flex flex-col bg-zinc-950 text-zinc-100">
@@ -98,8 +95,14 @@ export default function CreateLabel() {
             <>
               <h2 className="font-medium">Create a Label</h2>
               <p className="text-xs text-zinc-500">
-                A Label is your own basket vault — deposits split across the underlying LSTs you
-                choose next, and mint one token representing the blended position.
+                A Label is your own basket vault — deposits split across the underlying LSTs
+                below, and mint one token representing the blended position. You don&apos;t pick
+                the split: the system rebalances toward whichever pool is actually yielding more
+                each epoch (see{" "}
+                <Link href="/docs/create-a-label" className="underline">
+                  how
+                </Link>
+                ).
               </p>
               <Field label="Label Symbol (e.g. youXNT)">
                 <input
@@ -131,54 +134,6 @@ export default function CreateLabel() {
                 </Link>
                 <button
                   disabled={!symbol || !name}
-                  onClick={() => setStep("allocations")}
-                  className="btn-primary"
-                >
-                  Next →
-                </button>
-              </div>
-            </>
-          )}
-
-          {step === "allocations" && (
-            <>
-              <h2 className="font-medium">Choose allocations</h2>
-              <p className="text-xs text-zinc-500">
-                Split deposits across underlying pools by weight — must sum to 100%.
-              </p>
-              {AVAILABLE_POOLS.map((p, i) => (
-                <div key={p.address.toBase58()} className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-sm">{p.label}</div>
-                    <div className="text-xs text-zinc-500">{p.address.toBase58().slice(0, 8)}…</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={0}
-                      max={100}
-                      value={weights[i]}
-                      onChange={(e) => setWeight(i, Number(e.target.value))}
-                      className="input w-20 text-right"
-                    />
-                    <span className="text-sm text-zinc-500">%</span>
-                  </div>
-                </div>
-              ))}
-              <div className="flex items-center justify-between text-xs pt-1">
-                <button onClick={splitEvenly} className="text-zinc-500 hover:text-zinc-300">
-                  Split evenly
-                </button>
-                <span className={weightSum === 100 ? "text-emerald-400" : "text-amber-400"}>
-                  Total: {weightSum}%
-                </span>
-              </div>
-              <div className="flex justify-end gap-3 pt-2">
-                <button onClick={() => setStep("metadata")} className="btn-secondary">
-                  Back
-                </button>
-                <button
-                  disabled={weightSum !== 100}
                   onClick={() => setStep("review")}
                   className="btn-primary"
                 >
@@ -195,13 +150,25 @@ export default function CreateLabel() {
                 <Row k="Symbol" v={symbol} />
                 <Row k="Name" v={name} />
                 {description && <Row k="Description" v={description} />}
-                {AVAILABLE_POOLS.map((p, i) =>
-                  weights[i] > 0 ? <Row key={p.address.toBase58()} k={p.label} v={`${weights[i]}%`} /> : null,
-                )}
+              </div>
+              <div>
+                <div className="text-xs text-zinc-500 mb-2">
+                  Underlying pools (starts equal-weighted, auto-rebalanced from there)
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {AVAILABLE_POOLS.map((p) => (
+                    <span
+                      key={p.address.toBase58()}
+                      className="text-xs rounded-full border border-zinc-700 px-2 py-1 text-zinc-400"
+                    >
+                      {p.label}
+                    </span>
+                  ))}
+                </div>
               </div>
               {error && <div className="text-sm text-red-400 break-all">{error}</div>}
               <div className="flex justify-end gap-3 pt-2">
-                <button onClick={() => setStep("allocations")} className="btn-secondary">
+                <button onClick={() => setStep("metadata")} className="btn-secondary">
                   Back
                 </button>
                 <button onClick={handleCreate} disabled={busy} className="btn-primary">

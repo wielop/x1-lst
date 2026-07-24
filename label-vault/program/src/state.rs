@@ -11,6 +11,11 @@ pub const MAX_ALLOCATIONS: usize = 2;
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_SYMBOL_LEN: usize = 10;
 
+/// Rebalance's "chase best yield" cap: the best-performing allocation over
+/// the last epoch gets at most this weight, so the vault never goes to 100%
+/// in a single underlying pool no matter how far ahead it is.
+pub const REBALANCE_WINNER_WEIGHT_BPS: u16 = 7000;
+
 /// One underlying stake-pool-family LST that a portion of deposits is routed into.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, BorshSerialize, BorshDeserialize)]

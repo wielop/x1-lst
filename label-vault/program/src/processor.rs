@@ -1,7 +1,7 @@
 use crate::{
     error::VaultError,
     instruction::{find_vault_authority_address, find_vault_config_address, VaultInstruction, VAULT_AUTHORITY_SEED, VAULT_CONFIG_SEED},
-    state::{Allocation, VaultConfig, MAX_ALLOCATIONS, MAX_NAME_LEN, MAX_SYMBOL_LEN},
+    state::{Allocation, VaultConfig, MAX_ALLOCATIONS, MAX_NAME_LEN, MAX_SYMBOL_LEN, REBALANCE_WINNER_WEIGHT_BPS},
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
@@ -46,6 +46,7 @@ impl Processor {
             VaultInstruction::Withdraw { label_tokens_in } => {
                 Self::process_withdraw(program_id, accounts, label_tokens_in)
             }
+            VaultInstruction::Rebalance => Self::process_rebalance(program_id, accounts),
         }
     }
 
@@ -383,6 +384,351 @@ impl Processor {
             label_tokens_in,
             allocations.len()
         );
+        Ok(())
+    }
+
+    /// Operator-only. Chases last-epoch yield: the best-performing allocation
+    /// gets `REBALANCE_WINNER_WEIGHT_BPS`, the rest split the remainder
+    /// proportionally to their own (non-negative) yield. Actually moves
+    /// capital to match — not just future deposits.
+    #[inline(never)]
+    fn process_rebalance(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let creator_info = next_account_info(account_info_iter)?;
+        let vault_config_info = next_account_info(account_info_iter)?;
+        let vault_authority_info = next_account_info(account_info_iter)?;
+        let token_program_info = next_account_info(account_info_iter)?;
+        let system_program_info = next_account_info(account_info_iter)?;
+        let clock_info = next_account_info(account_info_iter)?;
+        let stake_history_info = next_account_info(account_info_iter)?;
+        let stake_program_info = next_account_info(account_info_iter)?;
+
+        if !creator_info.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let mut vault_config =
+            Self::load_vault_config_for_rebalance(program_id, vault_config_info, vault_authority_info)?;
+        if vault_config.creator != *creator_info.key {
+            return Err(VaultError::NotCreator.into());
+        }
+
+        let n = vault_config.allocation_count as usize;
+        let remaining = account_info_iter.as_slice();
+
+        let (yields, values, rate_num, rate_den) =
+            Self::rebalance_gather_snapshots(&vault_config, remaining, n)?;
+
+        let new_weights = Self::rebalance_compute_weights(&yields, n);
+        let total_value: u128 = values[..n].iter().sum();
+
+        let authority_seeds: &[&[u8]] = &[
+            VAULT_AUTHORITY_SEED,
+            vault_config.label_mint.as_ref(),
+            &[vault_config.vault_authority_bump],
+        ];
+
+        Self::rebalance_withdraw_excess(
+            remaining,
+            n,
+            &values,
+            &rate_num,
+            &rate_den,
+            &new_weights,
+            total_value,
+            vault_authority_info,
+            token_program_info,
+            clock_info,
+            stake_history_info,
+            stake_program_info,
+            authority_seeds,
+        )?;
+
+        Self::rebalance_deposit_surplus(
+            remaining,
+            n,
+            &values,
+            &new_weights,
+            total_value,
+            vault_authority_info,
+            system_program_info,
+            token_program_info,
+            authority_seeds,
+        )?;
+
+        for i in 0..n {
+            vault_config.allocations[i].weight_bps = new_weights[i];
+        }
+        vault_config.serialize(&mut &mut vault_config_info.data.borrow_mut()[..])?;
+
+        msg!("Rebalanced label {}", vault_config_info.key);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn load_vault_config_for_rebalance(
+        program_id: &Pubkey,
+        vault_config_info: &AccountInfo,
+        vault_authority_info: &AccountInfo,
+    ) -> Result<VaultConfig, ProgramError> {
+        let vault_config =
+            solana_program::borsh0_10::try_from_slice_unchecked::<VaultConfig>(&vault_config_info.data.borrow())
+                .map_err(|_| VaultError::NotInitialized)?;
+        if !vault_config.is_initialized {
+            return Err(VaultError::NotInitialized.into());
+        }
+        let (expected_vault_config, _) =
+            find_vault_config_address(program_id, &vault_config.label_mint);
+        if expected_vault_config != *vault_config_info.key {
+            return Err(VaultError::InvalidVaultConfig.into());
+        }
+        let (expected_vault_authority, _) =
+            find_vault_authority_address(program_id, &vault_config.label_mint);
+        if expected_vault_authority != *vault_authority_info.key {
+            return Err(VaultError::InvalidVaultAuthority.into());
+        }
+        Ok(vault_config)
+    }
+
+    /// Reads each allocation's current + last-epoch exchange rate and this
+    /// vault's current holding, returning only small fixed arrays — never
+    /// keeps a whole `StakePool` alive outside its own frame.
+    #[inline(never)]
+    #[allow(clippy::type_complexity)]
+    fn rebalance_gather_snapshots(
+        vault_config: &VaultConfig,
+        remaining: &[AccountInfo],
+        n: usize,
+    ) -> Result<
+        (
+            [i64; MAX_ALLOCATIONS],
+            [u128; MAX_ALLOCATIONS],
+            [u128; MAX_ALLOCATIONS],
+            [u128; MAX_ALLOCATIONS],
+        ),
+        ProgramError,
+    > {
+        let mut yields = [0i64; MAX_ALLOCATIONS];
+        let mut values = [0u128; MAX_ALLOCATIONS];
+        let mut rate_num = [0u128; MAX_ALLOCATIONS];
+        let mut rate_den = [0u128; MAX_ALLOCATIONS];
+
+        for i in 0..n {
+            let base = i * 7;
+            let pool_program_info = &remaining[base];
+            let pool_info = &remaining[base + 1];
+            let pool_withdraw_authority_info = &remaining[base + 2];
+            let reserve_stake_info = &remaining[base + 3];
+            let vault_token_info = &remaining[base + 4];
+            let manager_fee_info = &remaining[base + 5];
+            let pool_mint_info = &remaining[base + 6];
+
+            Self::check_allocation_accounts(
+                &vault_config.allocations[i],
+                pool_program_info,
+                pool_info,
+                pool_withdraw_authority_info,
+                reserve_stake_info,
+                vault_token_info,
+                manager_fee_info,
+                pool_mint_info,
+            )?;
+
+            let (yield_bps, value, num, den) = Self::read_rebalance_snapshot(pool_info, vault_token_info)?;
+            yields[i] = yield_bps;
+            values[i] = value;
+            rate_num[i] = num;
+            rate_den[i] = den;
+        }
+
+        Ok((yields, values, rate_num, rate_den))
+    }
+
+    #[inline(never)]
+    fn read_rebalance_snapshot(
+        pool_info: &AccountInfo,
+        vault_token_info: &AccountInfo,
+    ) -> Result<(i64, u128, u128, u128), ProgramError> {
+        let stake_pool =
+            solana_program::borsh0_10::try_from_slice_unchecked::<StakePool>(&pool_info.data.borrow())
+                .map_err(|_| VaultError::InvalidUnderlyingPool)?;
+        let current_num = stake_pool.total_lamports as u128;
+        let current_den = (stake_pool.pool_token_supply as u128).max(1);
+        let prev_num = stake_pool.last_epoch_total_lamports as u128;
+        let prev_den = (stake_pool.last_epoch_pool_token_supply as u128).max(1);
+
+        let yield_bps: i64 = if prev_num == 0 {
+            0
+        } else {
+            let ratio_scaled = current_num
+                .checked_mul(prev_den)
+                .and_then(|v| v.checked_mul(10_000))
+                .and_then(|v| v.checked_div(current_den.checked_mul(prev_num).unwrap_or(1)))
+                .ok_or(VaultError::CalculationFailure)?;
+            ratio_scaled as i64 - 10_000
+        };
+
+        let vault_balance = spl_token::state::Account::unpack(&vault_token_info.data.borrow())
+            .map_err(|_| VaultError::AllocationMismatch)?
+            .amount as u128;
+        let value = vault_balance
+            .checked_mul(current_num)
+            .and_then(|v| v.checked_div(current_den))
+            .ok_or(VaultError::CalculationFailure)?;
+
+        Ok((yield_bps, value, current_num, current_den))
+    }
+
+    /// Winner (highest last-epoch yield) gets `REBALANCE_WINNER_WEIGHT_BPS`;
+    /// the rest split what's left, proportional to their own yield (equally
+    /// if none of them grew at all).
+    fn rebalance_compute_weights(yields: &[i64; MAX_ALLOCATIONS], n: usize) -> [u16; MAX_ALLOCATIONS] {
+        let mut winner = 0usize;
+        for i in 1..n {
+            if yields[i] > yields[winner] {
+                winner = i;
+            }
+        }
+
+        let mut new_weights = [0u16; MAX_ALLOCATIONS];
+        if n == 1 {
+            new_weights[0] = 10_000;
+            return new_weights;
+        }
+
+        new_weights[winner] = REBALANCE_WINNER_WEIGHT_BPS;
+        let remaining_bps: u32 = 10_000 - REBALANCE_WINNER_WEIGHT_BPS as u32;
+        let other_count = (n - 1) as u32;
+        let sum_other_positive: i64 = (0..n).filter(|&i| i != winner).map(|i| yields[i].max(0)).sum();
+
+        let mut assigned = 0u32;
+        let mut last_other = winner;
+        for i in 0..n {
+            if i == winner {
+                continue;
+            }
+            last_other = i;
+            let w = if sum_other_positive > 0 {
+                (remaining_bps as u64 * yields[i].max(0) as u64 / sum_other_positive as u64) as u32
+            } else {
+                remaining_bps / other_count
+            };
+            new_weights[i] = w as u16;
+            assigned += w;
+        }
+        new_weights[last_other] = new_weights[last_other].saturating_add((remaining_bps - assigned) as u16);
+        new_weights
+    }
+
+    /// Pass 1: pull the excess out of every over-target allocation, straight
+    /// into the vault authority (not an external wallet — this is an internal
+    /// move, not a user withdrawal).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn rebalance_withdraw_excess<'a>(
+        remaining: &[AccountInfo<'a>],
+        n: usize,
+        values: &[u128; MAX_ALLOCATIONS],
+        rate_num: &[u128; MAX_ALLOCATIONS],
+        rate_den: &[u128; MAX_ALLOCATIONS],
+        new_weights: &[u16; MAX_ALLOCATIONS],
+        total_value: u128,
+        vault_authority_info: &AccountInfo<'a>,
+        token_program_info: &AccountInfo<'a>,
+        clock_info: &AccountInfo<'a>,
+        stake_history_info: &AccountInfo<'a>,
+        stake_program_info: &AccountInfo<'a>,
+        authority_seeds: &[&[u8]],
+    ) -> ProgramResult {
+        for i in 0..n {
+            let target_value = total_value * new_weights[i] as u128 / 10_000;
+            if target_value >= values[i] {
+                continue;
+            }
+            let excess_value = values[i] - target_value;
+            if excess_value == 0 {
+                continue;
+            }
+            let pool_tokens_out = u64::try_from(
+                excess_value
+                    .checked_mul(rate_den[i])
+                    .and_then(|v| v.checked_div(rate_num[i].max(1)))
+                    .ok_or(VaultError::CalculationFailure)?,
+            )
+            .map_err(|_| VaultError::CalculationFailure)?;
+            if pool_tokens_out == 0 {
+                continue;
+            }
+
+            let base = i * 7;
+            Self::cpi_withdraw_sol(
+                &remaining[base],
+                &remaining[base + 1],
+                &remaining[base + 2],
+                &remaining[base + 3],
+                &remaining[base + 4],
+                &remaining[base + 5],
+                &remaining[base + 6],
+                vault_authority_info,
+                vault_authority_info,
+                token_program_info,
+                clock_info,
+                stake_history_info,
+                stake_program_info,
+                authority_seeds,
+                pool_tokens_out,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Pass 2: whatever landed in the vault authority from pass 1 goes into
+    /// the (single, for MAX_ALLOCATIONS=2) under-target allocation. With more
+    /// than one under-target allocation this would need splitting between
+    /// them proportionally — fine today since there's at most one.
+    #[inline(never)]
+    fn rebalance_deposit_surplus<'a>(
+        remaining: &[AccountInfo<'a>],
+        n: usize,
+        values: &[u128; MAX_ALLOCATIONS],
+        new_weights: &[u16; MAX_ALLOCATIONS],
+        total_value: u128,
+        vault_authority_info: &AccountInfo<'a>,
+        system_program_info: &AccountInfo<'a>,
+        token_program_info: &AccountInfo<'a>,
+        authority_seeds: &[&[u8]],
+    ) -> ProgramResult {
+        let rent = Rent::get()?;
+        let min_rent = rent.minimum_balance(0);
+
+        for i in 0..n {
+            let target_value = total_value * new_weights[i] as u128 / 10_000;
+            if target_value <= values[i] {
+                continue;
+            }
+            let available = vault_authority_info.lamports().saturating_sub(min_rent);
+            if available == 0 {
+                continue;
+            }
+            let base = i * 7;
+            let accs: AllocAccounts = (
+                remaining[base].clone(),
+                remaining[base + 1].clone(),
+                remaining[base + 2].clone(),
+                remaining[base + 3].clone(),
+                remaining[base + 4].clone(),
+                remaining[base + 5].clone(),
+                remaining[base + 6].clone(),
+            );
+            Self::cpi_deposit_sol(
+                &accs,
+                vault_authority_info,
+                system_program_info,
+                token_program_info,
+                authority_seeds,
+                available,
+            )?;
+        }
         Ok(())
     }
 

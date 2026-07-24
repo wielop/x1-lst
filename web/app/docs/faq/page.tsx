@@ -29,6 +29,17 @@ export default function Faq() {
         needs a hand-rolled deserializer for the Label&apos;s config account.
       </p>
 
+      <h2>Who decides a Label&apos;s allocation weights?</h2>
+      <p>
+        Nobody, at creation time — every Label starts equal-weighted across its pools. From
+        there, a <code>Rebalance</code> instruction (run by the Label&apos;s creator, typically
+        from a script once per epoch — not a public button) shifts weight and actual capital
+        toward whichever pool genuinely yielded more last epoch. See{" "}
+        <Link href="/docs/create-a-label">Create a Label</Link> for why we removed the earlier
+        manual weight picker — a static, user-guessed split defeats the point of a system that&apos;s
+        supposed to chase yield on its own.
+      </p>
+
       <h2>Where does a Label&apos;s yield actually come from?</h2>
       <p>
         Purely from the underlying pools&apos; own staking rewards, reflected honestly in their

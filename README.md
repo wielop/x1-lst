@@ -147,10 +147,32 @@ actually comes from, so we only display real, attributable yield.
   tight, and raising this needs either a hand-rolled (non-derive) borsh
   deserializer for `VaultConfig` or confirming `--arch sbfv2` is safe for the
   target cluster.
-- Validated end-to-end on testnet: `CreateLabel` (60/40 split), `Deposit` (fans
-  out via CPI into both underlying pools' `DepositSol`, mints shares at
-  pre-deposit NAV), `Withdraw` (burns shares, CPIs `WithdrawSol` proportionally
-  out of each pool straight to the withdrawer).
+- Validated end-to-end on testnet: `CreateLabel`, `Deposit` (fans out via CPI
+  into every underlying pool's `DepositSol`, mints shares at pre-deposit NAV),
+  `Withdraw` (burns shares, CPIs `WithdrawSol` proportionally out of each pool
+  straight to the withdrawer), `Rebalance` (see below).
+
+### Rebalance: the system picks the split, not the user
+
+A Label starts equal-weighted across its pools — there's no weight picker in
+the create flow. Instead, `Rebalance` (restricted to `vault_config.creator`,
+meant to run once per epoch from an operator script — see
+`web/scripts/rebalance-label.ts`) chases real yield:
+
+1. Reads `total_lamports`/`pool_token_supply` (current rate) and
+   `last_epoch_total_lamports`/`last_epoch_pool_token_supply` (rate one epoch
+   ago) straight off each allocation's own `StakePool` account — both already
+   maintained by spl-stake-pool itself, no extra bookkeeping needed.
+2. Ranks allocations by last-epoch yield (cross-multiplied to avoid an
+   intermediate float), gives the winner `REBALANCE_WINNER_WEIGHT_BPS` (70%
+   cap), splits the rest proportional to their own yield.
+3. Actually moves the capital in the same instruction — CPIs `WithdrawSol` out
+   of every now-over-target allocation into the vault authority, then
+   `DepositSol`s whatever landed there into the under-target one(s).
+
+Validated on testnet: a 50/50 Label rebalanced to 70/30 toward the
+better-performing pool, with the underlying token balances actually shifting
+(not just the stored weight labels).
 
 **Two SBF stack-frame gotchas hit while building this**, worth knowing before
 extending it:

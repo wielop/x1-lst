@@ -27,6 +27,8 @@ pub enum VaultError {
     ZeroWithdraw,
     #[error("Calculation overflow")]
     CalculationFailure,
+    #[error("Only the Label's creator can trigger a rebalance")]
+    NotCreator,
 }
 
 impl From<VaultError> for ProgramError {
