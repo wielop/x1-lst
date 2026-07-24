@@ -1,0 +1,14 @@
+target/
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+
+# never commit private keys
+keys/
+*-keypair.json
+*.keypair.json
+id.json

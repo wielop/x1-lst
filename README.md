@@ -1,0 +1,121 @@
+# X1 Liquid Staking
+
+A liquid staking token (LST) for the [X1](https://x1.xyz) network, built from
+Solana Labs' audited `spl-stake-pool` program (v1.0.0, `solana-program 1.17.6`
+generation — the version whose toolchain requirements match X1's current
+runtime). Stake XNT, receive a pool token that represents your share of stake
+delegated across multiple X1 validators, and redeem it later for XNT plus
+accrued rewards.
+
+**Status: testnet only.** Nothing here has been deployed to X1 mainnet, and it
+should not be until testnet validation is complete and reviewed.
+
+## Why a fork instead of a new program
+
+The stake pool program is a well-audited, generic "factory" — anyone can spin
+up their own pool + mint under a compatible deployment of it, the same way
+[Sanctum](https://sanctum.so) does on Solana. X1 didn't have a public,
+independent one when this was built (the only existing LST on X1 is
+[Ripper Pool](https://x1ripper.xyz), program `XPoo1Fx6KNgeAzFcq2dPTo95bWGUSj5KdPVqYj9CZux`).
+Rather than modify the audited program logic, this repo deploys the unmodified
+program under its own program ID.
+
+## Layout
+
+```
+stake-pool/program/   the on-chain program (source unmodified except declare_id!)
+stake-pool/cli/        spl-stake-pool-cli, used to create/manage the pool
+stake-pool/js/         reference JS client at the matching version (see web/lib/stake-pool)
+libraries/, token/,     path-dependency crates the program/CLI need to build —
+token-metadata/,        vendored from solana-program-library at the same tag
+token-group/, memo/,    (stake-pool-v1.0.0) rather than pulled from crates.io,
+associated-token-account/  to keep the dependency graph pinned and buildable
+                        with X1's current toolchain
+web/                    Next.js frontend (stake/unstake UI + pool stats)
+```
+
+## Why this specific version
+
+X1's `cargo build-sbf` toolchain (platform-tools v1.41, rustc 1.75) can't
+build the current upstream `solana-program/stake-pool` — it depends on
+crates that require rustc ≥1.79 and a newer Cargo.lock format. `stake-pool-v1.0.0`
+(`solana-program = "1.17.6"`) is the newest tag that still builds cleanly with
+that toolchain — the same generation already used successfully for other X1
+programs in this project.
+
+## Building the program
+
+```bash
+cd stake-pool/program
+cargo build-sbf   # requires solana-cli with the matching platform-tools; see below
+```
+
+If you hit `lock file version 4 requires -Znext-lockfile-bump`, your ambient
+cargo bumped the checked-in v3 lockfile — restore it from git and pin
+`rust-toolchain.toml` in the program dir to `1.75.0` (or whatever version your
+`cargo build-sbf` bundles) before invoking any cargo command in that
+directory, including `cargo metadata`.
+
+Building `stake-pool/cli` requires `libudev` headers (Ledger/HID support) at
+compile time. If you can't `apt install libudev-dev`, download it without root:
+
+```bash
+apt-get download libudev-dev
+dpkg-deb -x libudev-dev_*.deb /tmp/libudev-shim
+CFLAGS="-I/tmp/libudev-shim/usr/include" \
+PKG_CONFIG_PATH=/tmp/libudev-shim/usr/lib/x86_64-linux-gnu/pkgconfig \
+cargo build --release
+```
+
+**Before building, set `declare_id!` in `stake-pool/program/src/lib.rs`** to
+the pubkey of the keypair you're actually deploying with — the CLI derives
+every PDA (withdraw authority, stake accounts, ...) from that constant, not
+from the address you pass to `solana program deploy`. A mismatch here makes
+every instruction fail with account/owner errors that look unrelated to the
+real cause.
+
+## Testnet deployment
+
+| Item | Address |
+|---|---|
+| Program | `HjJ81j6LvguqZP17WwPrWihqpCqWYMqPdVCEDtDXDd23` |
+| Pool | `9Ct35Dtu7Pnk2LXsKSeLyGupnvZpfxVDvvQ8X8biz6Ne` |
+| Pool mint (LST) | `6xsd6uzHZpWnaHWyWvEatF8qKPDaJ2MoH9FY1M3pyAcB` |
+| Reserve stake | `GgHkhne79PNdNFkMpWbh1odXq77adZUAM5HxwLVRwehd` |
+| Validator list | `BR2qMBYV399e27F872Pc2UzwGhRoj9X3GjgQC2GMu9YE` |
+
+Fees: 5% epoch fee, 0.2% stake/SOL withdrawal fee, 0% deposit fee (mirrors
+Ripper Pool's published fee schedule). 2 validators added for testing.
+
+Validated end-to-end on testnet: pool creation, `deposit-sol` → LST mint,
+`withdraw-sol` → LST burn, `add-validator`, `increase-validator-stake`
+(delegation confirmed active), and `update` across an epoch boundary.
+
+**Known issue, not ours to fix:** X1 testnet's public RPC
+(`rpc.testnet.x1.xyz`) is a proxy in front of multiple backend nodes with
+inconsistent health — some delinquent, some stuck on a stale slot. Reads
+intermittently return `AccountNotFound` or HTTP 503 even for accounts that
+definitely exist. The frontend retries reads a few times before giving up;
+CLI operations may need a manual retry.
+
+## Frontend
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+`lib/poolConfig.ts` selects network config via `NEXT_PUBLIC_X1_NETWORK`
+(defaults to `testnet`; `mainnet` is intentionally unset until the pool is
+live there). `lib/stake-pool/` is the JS client vendored from the matching
+`stake-pool-v1.0.0` tag rather than an npm install, since later versions of
+`@solana/spl-stake-pool` target a different on-chain account layout.
+
+## Not done yet
+
+- Mainnet deployment (deliberately withheld pending further testnet review)
+- Production validator set (currently 2 test validators; needs a real
+  selection methodology, e.g. Ripper Pool's P85-percentile self-stake filter)
+- Security review of the deployment/ops process (the program itself is the
+  unmodified, previously-audited Solana Labs code)
