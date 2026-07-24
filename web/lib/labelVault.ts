@@ -18,6 +18,23 @@ import {
 import { getStakePoolAccount } from "@/lib/stake-pool";
 import { findWithdrawAuthorityProgramAddress } from "@/lib/stake-pool/utils/program-address";
 
+// X1 testnet's public RPC is a proxy in front of multiple backend nodes with
+// inconsistent health, and rate-limits (HTTP 429) under any real load — every
+// read used to actually build a transaction (not just to display data) needs
+// to survive a transient failure, not just the passive page-refresh reads.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 6, delayMs = 1200): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Client for the label-vault program — a "Label" is a user-created basket
  * vault that splits deposits across several underlying stake-pool-family
@@ -179,7 +196,7 @@ export async function getVaultConfig(
   connection: Connection,
   vaultConfigAddress: PublicKey,
 ): Promise<VaultConfig | null> {
-  const info = await connection.getAccountInfo(vaultConfigAddress, "confirmed");
+  const info = await withRetry(() => connection.getAccountInfo(vaultConfigAddress, "confirmed"));
   if (!info) return null;
   return decodeVaultConfig(info.data);
 }
@@ -188,10 +205,12 @@ export async function getVaultConfig(
 export async function listLabels(
   connection: Connection,
 ): Promise<{ address: PublicKey; config: VaultConfig }[]> {
-  const accounts = await connection.getProgramAccounts(LABEL_VAULT_PROGRAM_ID, {
-    filters: [{ dataSize: VAULT_CONFIG_LEN }],
-    commitment: "confirmed",
-  });
+  const accounts = await withRetry(() =>
+    connection.getProgramAccounts(LABEL_VAULT_PROGRAM_ID, {
+      filters: [{ dataSize: VAULT_CONFIG_LEN }],
+      commitment: "confirmed",
+    }),
+  );
   return accounts.map(({ pubkey, account }) => ({
     address: pubkey,
     config: decodeVaultConfig(account.data),
@@ -237,10 +256,10 @@ export async function buildCreateLabelTransactions(
   const [vaultAuthority] = findVaultAuthorityAddress(labelMint.publicKey);
 
   const pools = await Promise.all(
-    allocationTargets.map((t) => getStakePoolAccount(connection, t.poolAddress)),
+    allocationTargets.map((t) => withRetry(() => getStakePoolAccount(connection, t.poolAddress))),
   );
 
-  const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
+  const mintRent = await withRetry(() => connection.getMinimumBalanceForRentExemption(MINT_SIZE));
   const setupInstructions: TransactionInstruction[] = [
     SystemProgram.createAccount({
       fromPubkey: payer,
@@ -401,8 +420,8 @@ export async function computeLabelNav(
   const perAllocation: { poolAddress: PublicKey; valueLamports: bigint; balance: bigint }[] = [];
   for (const a of vaultConfig.allocations) {
     const [pool, tokenAccount] = await Promise.all([
-      getStakePoolAccount(connection, a.poolAddress),
-      getAccount(connection, a.vaultTokenAccount),
+      withRetry(() => getStakePoolAccount(connection, a.poolAddress)),
+      withRetry(() => getAccount(connection, a.vaultTokenAccount)),
     ]);
     const totalLamports = BigInt(pool.account.data.totalLamports.toString());
     const poolTokenSupply = BigInt(pool.account.data.poolTokenSupply.toString()) || 1n;
@@ -415,7 +434,7 @@ export async function computeLabelNav(
 }
 
 export async function getLabelMintSupply(connection: Connection, labelMint: PublicKey): Promise<bigint> {
-  const mint = await getMint(connection, labelMint);
+  const mint = await withRetry(() => getMint(connection, labelMint));
   return mint.supply;
 }
 
