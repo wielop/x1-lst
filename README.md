@@ -32,6 +32,8 @@ token-group/, memo/,    (stake-pool-v1.0.0) rather than pulled from crates.io,
 associated-token-account/  to keep the dependency graph pinned and buildable
                         with X1's current toolchain
 web/                    Next.js frontend (stake/unstake UI + pool stats)
+label-vault/program/   custom program: multi-LST basket vault ("Labels"),
+                        see below
 ```
 
 ## Why this specific version
@@ -119,6 +121,53 @@ intermittently return `AccountNotFound` or HTTP 503 even for accounts that
 definitely exist. The frontend retries reads a few times before giving up;
 CLI operations may need a manual retry.
 
+## label-vault: basket vault ("Labels")
+
+A second, custom program modeled on [ClearSol](https://clearsol.network) —
+rather than a single-pool LST, a "Label" is a user-created basket that splits
+a deposit across several underlying stake-pool-family LSTs (by weight) and
+mints one share token representing the blended position. NAV is the sum of
+each holding's value at that pool's own exchange rate
+(`total_lamports / pool_token_supply`); no separate "boost" is fabricated —
+ClearSol's own docs don't explain where their extra ~4.4% over base APY
+actually comes from, so we only display real, attributable yield.
+
+- **Program:** `HuxK4tFifoCfUzN1asHf5xae7XqszmkEC9gMvxPSVekG` (testnet)
+- Underlying allocations are read live from each pool's on-chain `StakePool`
+  account (reserve, mint, fee account, withdraw authority) — never trusted
+  from client input — so a Label can point at *any* stake-pool-family program,
+  including Ripper Pool or the official X1 Delegation Program once this goes
+  to mainnet. On testnet it points at our own two pool instances
+  (`9Ct35Dtu7Pnk2LXsKSeLyGupnvZpfxVDvvQ8X8biz6Ne` and
+  `9SA2Xsqn5BbihiswScziKaGWmjr6KAByqb1emEsnC1fW`) since neither Ripper nor the
+  Delegation Program exist there — CPI can't cross clusters, so this is the
+  only way to test the mechanism before mainnet.
+- `MAX_ALLOCATIONS` is currently capped at **2** (see the note in
+  `label-vault/program/src/state.rs`) — SBF's 4KB-per-stack-frame limit is
+  tight, and raising this needs either a hand-rolled (non-derive) borsh
+  deserializer for `VaultConfig` or confirming `--arch sbfv2` is safe for the
+  target cluster.
+- Validated end-to-end on testnet: `CreateLabel` (60/40 split), `Deposit` (fans
+  out via CPI into both underlying pools' `DepositSol`, mints shares at
+  pre-deposit NAV), `Withdraw` (burns shares, CPIs `WithdrawSol` proportionally
+  out of each pool straight to the withdrawer).
+
+**Two SBF stack-frame gotchas hit while building this**, worth knowing before
+extending it:
+1. Any per-instruction handler large enough to get inlined into the shared
+   dispatcher can blow the 4KB/frame limit *without necessarily generating a
+   compiler warning* — the compiler catches some cases (a giant borsh-derived
+   `AbiEnumVisitor` in `solana_program` itself trips this on every build, log
+   noise but harmless) but not others. Mark every non-trivial per-instruction
+   function `#[inline(never)]`, and extract per-loop-iteration bodies into
+   their own `#[inline(never)]` functions too — a loop body inlined into its
+   caller accumulates stack across iterations in ways that are hard to predict.
+2. Borsh's derived, *checked* `try_from_slice` (which verifies every byte gets
+   consumed) measurably increases stack usage over
+   `solana_program::borsh0_10::try_from_slice_unchecked` for the same struct —
+   large account reads should use the unchecked variant regardless of whether
+   there's a real size mismatch to guard against.
+
 ## Frontend
 
 ```bash
@@ -140,3 +189,6 @@ live there). `lib/stake-pool/` is the JS client vendored from the matching
   mainnet validator set before going live
 - Security review of the deployment/ops process (the program itself is the
   unmodified, previously-audited Solana Labs code)
+- label-vault: frontend (Create Label wizard + per-label deposit/withdraw UI),
+  raising `MAX_ALLOCATIONS` past 2, and (for mainnet) pointing allocations at
+  the real Ripper Pool / X1 Delegation Program addresses
