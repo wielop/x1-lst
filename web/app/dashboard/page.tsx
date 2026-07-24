@@ -105,9 +105,14 @@ export default function Dashboard() {
             <div className="font-semibold">X1 Liquid Staking — Dashboard</div>
             <div className="text-xs text-zinc-500 uppercase tracking-wide">{ACTIVE_NETWORK}</div>
           </div>
-          <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-100">
-            ← Stake / Unstake
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link href="/labels" className="text-sm text-zinc-400 hover:text-zinc-100">
+              Labels
+            </Link>
+            <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-100">
+              ← Stake / Unstake
+            </Link>
+          </div>
         </div>
       </header>
 

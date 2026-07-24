@@ -170,6 +170,11 @@ extending it:
 
 ## Frontend
 
+Pages: `/` (stake/unstake the base pool), `/dashboard` (pool stats + validator
+selection report), `/create` (Create a Label wizard), `/labels` (browse all
+Labels), `/label/[address]` (deposit/withdraw a specific Label), `/docs` (full
+documentation site — start there for a guided tour).
+
 ```bash
 cd web
 npm install

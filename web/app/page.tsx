@@ -182,8 +182,14 @@ export default function Home() {
             <div className="text-xs text-zinc-500 uppercase tracking-wide">{ACTIVE_NETWORK}</div>
           </div>
           <div className="flex items-center gap-4">
+            <Link href="/labels" className="text-sm text-zinc-400 hover:text-zinc-100">
+              Labels
+            </Link>
             <Link href="/dashboard" className="text-sm text-zinc-400 hover:text-zinc-100">
               Dashboard
+            </Link>
+            <Link href="/docs" className="text-sm text-zinc-400 hover:text-zinc-100">
+              Docs
             </Link>
             <WalletButton />
           </div>
