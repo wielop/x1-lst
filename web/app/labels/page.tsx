@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { listLabels, type VaultConfig } from "@/lib/labelVault";
 import { ACTIVE_NETWORK } from "@/lib/poolConfig";
+import { createPoller } from "@/lib/rpcRetry";
 
 function shortAddr(addr: string) {
   return addr.slice(0, 4) + "…" + addr.slice(-4);
@@ -16,24 +17,21 @@ export default function Labels() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    let lastErr: unknown;
-    for (let i = 0; i < 4; i++) {
-      try {
-        const result = await listLabels(connection);
-        setLabels(result.map((l) => ({ address: l.address.toBase58(), config: l.config })));
-        setError(null);
-        return;
-      } catch (e) {
-        lastErr = e;
-        await new Promise((r) => setTimeout(r, 1500));
-      }
+    try {
+      // listLabels() already retries internally (see lib/labelVault.ts) — no
+      // need to wrap it in another retry loop here too.
+      const result = await listLabels(connection);
+      setLabels(result.map((l) => ({ address: l.address.toBase58(), config: l.config })));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
-    setError(lastErr instanceof Error ? lastErr.message : String(lastErr));
   }, [connection]);
 
   useEffect(() => {
-    void refresh();
-    const id = setInterval(() => void refresh(), 20000);
+    const tick = createPoller(refresh);
+    void tick();
+    const id = setInterval(() => void tick(), 45000);
     return () => clearInterval(id);
   }, [refresh]);
 

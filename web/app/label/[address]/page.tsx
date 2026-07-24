@@ -17,6 +17,7 @@ import {
   type VaultConfig,
 } from "@/lib/labelVault";
 import { ACTIVE_NETWORK } from "@/lib/poolConfig";
+import { withRetry, createPoller } from "@/lib/rpcRetry";
 
 type Tab = "stake" | "unstake";
 
@@ -26,19 +27,6 @@ function fmt(n: number, dp = 4) {
 
 function shortAddr(addr: string) {
   return addr.slice(0, 4) + "…" + addr.slice(-4);
-}
-
-async function withRetry<T>(fn: () => Promise<T>, attempts = 6, delayMs = 1500): Promise<T> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fn();
-    } catch (e) {
-      lastErr = e;
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
 }
 
 export default function LabelPage() {
@@ -69,12 +57,14 @@ export default function LabelPage() {
   const refreshLabel = useCallback(async () => {
     if (!vaultConfigAddress) return;
     try {
-      const cfg = await withRetry(() => getVaultConfig(connection, vaultConfigAddress));
+      // getVaultConfig/computeLabelNav/getLabelMintSupply already retry
+      // internally (see lib/labelVault.ts) — don't wrap them again here.
+      const cfg = await getVaultConfig(connection, vaultConfigAddress);
       if (!cfg) return;
       setConfig(cfg);
       const [{ navLamports: nav }, supply] = await Promise.all([
-        withRetry(() => computeLabelNav(connection, cfg)),
-        withRetry(() => getLabelMintSupply(connection, cfg.labelMint)),
+        computeLabelNav(connection, cfg),
+        getLabelMintSupply(connection, cfg.labelMint),
       ]);
       setNavLamports(Number(nav));
       setLabelSupply(Number(supply));
@@ -105,16 +95,14 @@ export default function LabelPage() {
   }, [connection, publicKey, config]);
 
   useEffect(() => {
-    void refreshLabel();
-    const id = setInterval(() => void refreshLabel(), 20000);
+    const tick = createPoller(async () => {
+      await refreshLabel();
+      await refreshWallet();
+    });
+    void tick();
+    const id = setInterval(() => void tick(), 45000);
     return () => clearInterval(id);
-  }, [refreshLabel]);
-
-  useEffect(() => {
-    void refreshWallet();
-    const id = setInterval(() => void refreshWallet(), 20000);
-    return () => clearInterval(id);
-  }, [refreshWallet]);
+  }, [refreshLabel, refreshWallet]);
 
   const exchangeRate =
     navLamports !== null && labelSupply !== null && labelSupply > 0

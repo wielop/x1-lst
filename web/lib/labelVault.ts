@@ -17,23 +17,7 @@ import {
 } from "@solana/spl-token";
 import { getStakePoolAccount } from "@/lib/stake-pool";
 import { findWithdrawAuthorityProgramAddress } from "@/lib/stake-pool/utils/program-address";
-
-// X1 testnet's public RPC is a proxy in front of multiple backend nodes with
-// inconsistent health, and rate-limits (HTTP 429) under any real load — every
-// read used to actually build a transaction (not just to display data) needs
-// to survive a transient failure, not just the passive page-refresh reads.
-async function withRetry<T>(fn: () => Promise<T>, attempts = 6, delayMs = 1200): Promise<T> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fn();
-    } catch (e) {
-      lastErr = e;
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
-}
+import { withRetry } from "@/lib/rpcRetry";
 
 /**
  * Client for the label-vault program — a "Label" is a user-created basket

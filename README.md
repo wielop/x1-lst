@@ -116,10 +116,23 @@ exposed through the deployed site.
 
 **Known issue, not ours to fix:** X1 testnet's public RPC
 (`rpc.testnet.x1.xyz`) is a proxy in front of multiple backend nodes with
-inconsistent health — some delinquent, some stuck on a stale slot. Reads
-intermittently return `AccountNotFound` or HTTP 503 even for accounts that
-definitely exist. The frontend retries reads a few times before giving up;
-CLI operations may need a manual retry.
+inconsistent health — some delinquent, some stuck on a stale slot — and rate
+limits (HTTP 429) under real load. Reads intermittently return
+`AccountNotFound` or HTTP 503 even for accounts that definitely exist. The
+frontend retries reads a few times before giving up; CLI operations may need
+a manual retry.
+
+All RPC retry logic lives in one place, `web/lib/rpcRetry.ts` — a 429-aware
+`withRetry` (much longer backoff specifically for rate-limit responses, plus
+jitter) and a `createPoller` helper that skips a poll tick if the previous one
+is still retrying, instead of piling more in-flight requests on top. Every
+page previously ran its own independent `setInterval` polling loop, each with
+its own ad-hoc retry loop, and some of those loops wrapped functions in
+`lib/labelVault.ts` that *already* retried internally — the combination
+multiplied request volume enough to trigger a real 429 storm in production.
+Fixed by consolidating: one poller per page (even when it refreshes multiple
+things), longer intervals (45s), and no double-wrapping of functions that
+already retry internally.
 
 ## label-vault: basket vault ("Labels")
 

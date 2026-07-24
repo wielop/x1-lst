@@ -8,26 +8,12 @@ import { LAMPORTS_PER_SOL, Transaction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, getAccount } from "@solana/spl-token";
 import { depositSol, withdrawSol, stakePoolInfo } from "@/lib/stake-pool";
 import { POOL_CONFIG, ACTIVE_NETWORK } from "@/lib/poolConfig";
+import { withRetry, createPoller } from "@/lib/rpcRetry";
 
 type Tab = "stake" | "unstake";
 
 function fmt(n: number, dp = 4) {
   return n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: dp });
-}
-
-// X1 testnet's public RPC load-balances across nodes with inconsistent state,
-// so reads occasionally 404 transiently even on accounts that definitely exist.
-async function withRetry<T>(fn: () => Promise<T>, attempts = 6, delayMs = 1500): Promise<T> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fn();
-    } catch (e) {
-      lastErr = e;
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
 }
 
 export default function Home() {
@@ -83,16 +69,18 @@ export default function Home() {
   }, [connection, publicKey]);
 
   useEffect(() => {
-    void refreshPool();
-    const id = setInterval(() => void refreshPool(), 15000);
+    // One shared poll loop (sequential, not two parallel intervals) so this
+    // page makes at most one round of RPC calls at a time — several pages
+    // each running their own independent interval is what caused a real 429
+    // storm in production.
+    const tick = createPoller(async () => {
+      await refreshPool();
+      await refreshWallet();
+    });
+    void tick();
+    const id = setInterval(() => void tick(), 45000);
     return () => clearInterval(id);
-  }, [refreshPool]);
-
-  useEffect(() => {
-    void refreshWallet();
-    const id = setInterval(() => void refreshWallet(), 15000);
-    return () => clearInterval(id);
-  }, [refreshWallet]);
+  }, [refreshPool, refreshWallet]);
 
   const exchangeRate =
     pool && Number(pool.poolTokenSupply) > 0

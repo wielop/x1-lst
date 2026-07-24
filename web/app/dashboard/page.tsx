@@ -6,6 +6,7 @@ import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { stakePoolInfo } from "@/lib/stake-pool";
 import { POOL_CONFIG, ACTIVE_NETWORK } from "@/lib/poolConfig";
 import type { ValidatorCandidate } from "@/lib/validatorSelection";
+import { withRetry, createPoller } from "@/lib/rpcRetry";
 
 function fmt(n: number, dp = 4) {
   return n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: dp });
@@ -52,7 +53,7 @@ export default function Dashboard() {
   const refreshPool = useCallback(async () => {
     try {
       const connection = new Connection(POOL_CONFIG.rpcUrl, "confirmed");
-      const info = await stakePoolInfo(connection, POOL_CONFIG.poolAddress);
+      const info = await withRetry(() => stakePoolInfo(connection, POOL_CONFIG.poolAddress));
       setPool({
         totalLamports: info.totalLamports,
         poolTokenSupply: info.poolTokenSupply,
@@ -82,12 +83,12 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    void refreshPool();
-    void refreshValidators();
-    const id = setInterval(() => {
-      void refreshPool();
-      void refreshValidators();
-    }, 30000);
+    const tick = createPoller(async () => {
+      await refreshPool();
+      await refreshValidators();
+    });
+    void tick();
+    const id = setInterval(() => void tick(), 45000);
     return () => clearInterval(id);
   }, [refreshPool, refreshValidators]);
 
