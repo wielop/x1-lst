@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b0e14;
+  --bg-panel: #131826;
+  --bg-panel-2: #1a2133;
+  --text: #e8ecf4;
+  --text-dim: #96a0b5;
+  --border: #2a3348;
+
+  --miners: #d9a441;
+  --degens: #e0524f;
+  --builders: #4fa8e0;
+  --validators: #4fd18a;
+  --neutral: #9aa3b5;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.faction-miners {
+  --faction: var(--miners);
+}
+.faction-degens {
+  --faction: var(--degens);
+}
+.faction-builders {
+  --faction: var(--builders);
+}
+.faction-validators {
+  --faction: var(--validators);
+}
+.faction-neutral {
+  --faction: var(--neutral);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
