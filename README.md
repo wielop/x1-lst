@@ -91,9 +91,19 @@ npm start   # commits the initial seed on first run, then serves the HTTP API
 The resolver listens on `:8787` (`RESOLVER_PORT`) by default. **The frontend
 needs to reach this from the browser**, not just from this machine — running
 `web` locally alongside it works via `localhost`, but a Vercel-hosted
-frontend needs the resolver exposed on a real public URL (tunnel, or a VPS
-like the ones already used for other bots in this account) with
+frontend needs the resolver exposed on a real public URL with
 `NEXT_PUBLIC_RESOLVER_URL` pointed at it.
+
+The canonical running instance lives on the same VPS as the other bots in
+this account (`~/mines-resolver`, PM2 process `mines-resolver`,
+`51.83.160.27:8787`), started via `pm2 start npm --name mines-resolver --
+start` from that directory. It's a standalone copy (not a symlink into this
+repo), so `idl.ts` reads the IDL from `IDL_PATH` (set in its `.env`) instead
+of assuming the monorepo's `target/idl/` layout. Redeploying a program
+upgrade means re-copying `target/idl/mines.json` there and restarting the
+PM2 process; changing resolver logic means re-syncing `resolver/` (minus
+`node_modules`) plus `keys/resolver-testnet.json` and `seed-store.json`
+(the live seed state — never regenerate it on the VPS, copy the real one).
 
 Frontend:
 
