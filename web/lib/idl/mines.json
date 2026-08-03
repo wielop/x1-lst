@@ -262,41 +262,22 @@
       ]
     },
     {
-      "name": "requestReveal",
-      "docs": [
-        "Cheap, player-signed on-chain intent: \"I want tile N revealed.\"",
-        "Keeps a public audit trail of exactly which tile was actually",
-        "requested, so the resolver can't quietly reveal tiles no one asked for."
-      ],
-      "accounts": [
-        {
-          "name": "player",
-          "isMut": false,
-          "isSigner": true
-        },
-        {
-          "name": "round",
-          "isMut": true,
-          "isSigner": false
-        }
-      ],
-      "args": [
-        {
-          "name": "tileIndex",
-          "type": "u8"
-        }
-      ]
-    },
-    {
       "name": "resolveReveal",
       "docs": [
-        "Resolver-signed settlement of a previously requested tile. The",
-        "resolver derives `is_mine` off-chain from its secret server seed;",
-        "this program does not (and structurally cannot, without leaking mine",
-        "positions through readable account data) verify the mine layout",
-        "itself. Fairness is enforced after the fact via `commit_seed` /",
-        "`reveal_seed`, not verified live on-chain — same trust model used by",
-        "every provably-fair off-chain-resolved casino game."
+        "Resolver-signed settlement of a tile the player clicked. The click",
+        "itself is a plain HTTP call to the resolver (see resolver/src/http.ts)",
+        "— no player-signed transaction, so clicking through a round costs",
+        "zero extra wallet approvals beyond start_round/cash_out. The resolver",
+        "derives `is_mine` off-chain from its secret server seed; this program",
+        "does not (and structurally cannot, without leaking mine positions",
+        "through readable account data) verify the mine layout itself.",
+        "Fairness is enforced after the fact via `commit_seed` / `reveal_seed`,",
+        "not verified live on-chain — same trust model used by every",
+        "provably-fair off-chain-resolved casino game. The tradeoff for",
+        "dropping the on-chain request step: a malicious resolver could in",
+        "principle resolve a tile the player never clicked, but that can only",
+        "hurt the round it happens in (payouts always go to round.player",
+        "regardless), so it's a mild griefing vector, not a fund-theft one."
       ],
       "accounts": [
         {
@@ -807,51 +788,6 @@
       ]
     },
     {
-      "name": "RevealRequested",
-      "fields": [
-        {
-          "name": "round",
-          "type": "publicKey",
-          "index": false
-        },
-        {
-          "name": "roundId",
-          "type": "u64",
-          "index": false
-        },
-        {
-          "name": "player",
-          "type": "publicKey",
-          "index": false
-        },
-        {
-          "name": "tileIndex",
-          "type": "u8",
-          "index": false
-        },
-        {
-          "name": "clientSeed",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          },
-          "index": false
-        },
-        {
-          "name": "seedCommitment",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          },
-          "index": false
-        }
-      ]
-    },
-    {
       "name": "RevealResolved",
       "fields": [
         {
@@ -1031,40 +967,35 @@
     {
       "code": 6005,
       "name": "TileAlreadyHandled",
-      "msg": "tile was already requested or revealed"
+      "msg": "tile was already revealed"
     },
     {
       "code": 6006,
-      "name": "TileNotRequested",
-      "msg": "tile was not requested before resolve"
-    },
-    {
-      "code": 6007,
       "name": "RoundNotActive",
       "msg": "round is not active"
     },
     {
-      "code": 6008,
+      "code": 6007,
       "name": "NothingToCashOut",
       "msg": "no safe tiles revealed yet, nothing to cash out"
     },
     {
-      "code": 6009,
+      "code": 6008,
       "name": "SeedMismatch",
       "msg": "revealed raw seed does not match its committed hash"
     },
     {
-      "code": 6010,
+      "code": 6009,
       "name": "NoSeedCommitted",
       "msg": "no seed has been committed yet"
     },
     {
-      "code": 6011,
+      "code": 6010,
       "name": "InvalidParam",
       "msg": "invalid instruction parameter"
     },
     {
-      "code": 6012,
+      "code": 6011,
       "name": "InsufficientBankroll",
       "msg": "bankroll has insufficient balance"
     }

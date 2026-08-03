@@ -10,6 +10,8 @@ import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddres
 import BN from "bn.js";
 import fs from "node:fs";
 import { PROGRAM_ID, RPC_URL, configPda, roundPda } from "./config.js";
+
+const RESOLVER_HTTP_URL = process.env.RESOLVER_HTTP_URL ?? "http://localhost:8787";
 import { minesIdl } from "./idl.js";
 
 function loadKeypair(path: string): Keypair {
@@ -39,13 +41,14 @@ async function main() {
     .startRound(new BN(betLamports), 3, clientSeed)
     .accounts({ player: player.publicKey, config, vault, round, systemProgram: SystemProgram.programId })
     .rpc();
-  console.log("round started, requesting reveal of tile 0...");
+  console.log("round started, hitting resolver HTTP endpoint for tile 0 (no wallet tx)...");
 
-  await program.methods
-    .requestReveal(0)
-    .accounts({ player: player.publicKey, round })
-    .rpc();
-  console.log("reveal requested, waiting for resolver...");
+  const res = await fetch(`${RESOLVER_HTTP_URL}/reveal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ roundId: roundId.toString(), tileIndex: 0 }),
+  });
+  console.log(`resolver responded: ${res.status} ${JSON.stringify(await res.json())}`);
 
   let roundAccount: any;
   for (let i = 0; i < 15; i++) {

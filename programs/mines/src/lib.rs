@@ -208,42 +208,25 @@ pub mod mines {
         Ok(())
     }
 
-    /// Cheap, player-signed on-chain intent: "I want tile N revealed."
-    /// Keeps a public audit trail of exactly which tile was actually
-    /// requested, so the resolver can't quietly reveal tiles no one asked for.
-    pub fn request_reveal(ctx: Context<RequestReveal>, tile_index: u8) -> Result<()> {
-        let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Active as u8, MinesError::RoundNotActive);
-        require!(tile_index < TOTAL_TILES, MinesError::InvalidTileIndex);
-        let bit = 1u32 << tile_index;
-        require!(round.requested_bitmap & bit == 0, MinesError::TileAlreadyHandled);
-        require!(round.revealed_bitmap & bit == 0, MinesError::TileAlreadyHandled);
-        round.requested_bitmap |= bit;
-
-        emit!(RevealRequested {
-            round: round.key(),
-            round_id: round.round_id,
-            player: round.player,
-            tile_index,
-            client_seed: round.client_seed,
-            seed_commitment: round.seed_commitment,
-        });
-        Ok(())
-    }
-
-    /// Resolver-signed settlement of a previously requested tile. The
-    /// resolver derives `is_mine` off-chain from its secret server seed;
-    /// this program does not (and structurally cannot, without leaking mine
-    /// positions through readable account data) verify the mine layout
-    /// itself. Fairness is enforced after the fact via `commit_seed` /
-    /// `reveal_seed`, not verified live on-chain — same trust model used by
-    /// every provably-fair off-chain-resolved casino game.
+    /// Resolver-signed settlement of a tile the player clicked. The click
+    /// itself is a plain HTTP call to the resolver (see resolver/src/http.ts)
+    /// — no player-signed transaction, so clicking through a round costs
+    /// zero extra wallet approvals beyond start_round/cash_out. The resolver
+    /// derives `is_mine` off-chain from its secret server seed; this program
+    /// does not (and structurally cannot, without leaking mine positions
+    /// through readable account data) verify the mine layout itself.
+    /// Fairness is enforced after the fact via `commit_seed` / `reveal_seed`,
+    /// not verified live on-chain — same trust model used by every
+    /// provably-fair off-chain-resolved casino game. The tradeoff for
+    /// dropping the on-chain request step: a malicious resolver could in
+    /// principle resolve a tile the player never clicked, but that can only
+    /// hurt the round it happens in (payouts always go to round.player
+    /// regardless), so it's a mild griefing vector, not a fund-theft one.
     pub fn resolve_reveal(ctx: Context<ResolveReveal>, tile_index: u8, is_mine: bool) -> Result<()> {
         let round = &mut ctx.accounts.round;
         require!(round.status == RoundStatus::Active as u8, MinesError::RoundNotActive);
         require!(tile_index < TOTAL_TILES, MinesError::InvalidTileIndex);
         let bit = 1u32 << tile_index;
-        require!(round.requested_bitmap & bit != 0, MinesError::TileNotRequested);
         require!(round.revealed_bitmap & bit == 0, MinesError::TileAlreadyHandled);
         round.revealed_bitmap |= bit;
 
@@ -521,13 +504,6 @@ pub struct StartRound<'info> {
 }
 
 #[derive(Accounts)]
-pub struct RequestReveal<'info> {
-    pub player: Signer<'info>,
-    #[account(mut, has_one = player, seeds = [ROUND_SEED, &round.round_id.to_le_bytes()], bump = round.bump)]
-    pub round: Account<'info, Round>,
-}
-
-#[derive(Accounts)]
 pub struct ResolveReveal<'info> {
     pub resolver_authority: Signer<'info>,
     #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = resolver_authority)]
@@ -716,16 +692,6 @@ pub struct RoundStarted {
 }
 
 #[event]
-pub struct RevealRequested {
-    pub round: Pubkey,
-    pub round_id: u64,
-    pub player: Pubkey,
-    pub tile_index: u8,
-    pub client_seed: [u8; 32],
-    pub seed_commitment: [u8; 32],
-}
-
-#[event]
 pub struct RevealResolved {
     pub round: Pubkey,
     pub round_id: u64,
@@ -789,10 +755,8 @@ pub enum MinesError {
     BetOutOfRange,
     #[msg("tile index out of range")]
     InvalidTileIndex,
-    #[msg("tile was already requested or revealed")]
+    #[msg("tile was already revealed")]
     TileAlreadyHandled,
-    #[msg("tile was not requested before resolve")]
-    TileNotRequested,
     #[msg("round is not active")]
     RoundNotActive,
     #[msg("no safe tiles revealed yet, nothing to cash out")]

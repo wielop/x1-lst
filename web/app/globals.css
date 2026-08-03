@@ -88,15 +88,45 @@ header h1 {
   width: 90px;
 }
 
-.controls .hint {
-  display: block;
-  width: 210px;
-  white-space: normal;
-  font-size: 11px;
-  line-height: 1.4;
-  color: #6b7686;
-  font-weight: 400;
-  margin-top: 4px;
+.mult-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 18px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--mult-color) 14%, #161b26);
+  border: 1px solid var(--mult-color);
+  animation: multPop 260ms ease-out;
+}
+
+.mult-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--mult-color);
+  line-height: 1.1;
+  text-shadow: 0 0 16px color-mix(in srgb, var(--mult-color) 55%, transparent);
+}
+
+.mult-caption {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #93a0b4;
+}
+
+@keyframes multPop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.3;
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 .controls button {

@@ -7,6 +7,7 @@ import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   PROGRAM_ID,
+  RESOLVER_URL,
   TOTAL_TILES,
   GRID_SIZE,
   configPda,
@@ -20,6 +21,14 @@ type TileState = "hidden" | "pending" | "safe" | "mine";
 
 const HOUSE_EDGE_BPS = 200; // mirrors on-chain default; overwritten once config loads
 const REVEAL_TIMEOUT_MS = 20_000; // if the resolver hasn't answered by then, something's wrong
+
+/** Green -> red as risk climbs, so the number itself communicates the stakes. */
+function riskColor(mineCount: number): string {
+  if (mineCount <= 3) return "#4ade80";
+  if (mineCount <= 8) return "#a3e635";
+  if (mineCount <= 14) return "#fb923c";
+  return "#f87171";
+}
 
 export function MinesGame() {
   const { connection } = useConnection();
@@ -102,9 +111,8 @@ export function MinesGame() {
 
   const revealTile = useCallback(
     async (index: number) => {
-      if (!program || !wallet.publicKey || roundId === null || status !== "active") return;
+      if (!wallet.publicKey || roundId === null || status !== "active") return;
       if (tiles[index] !== "hidden") return;
-      setBusy(true);
       setError(null);
       setTiles((prev) => {
         const next = [...prev];
@@ -113,17 +121,24 @@ export function MinesGame() {
       });
       setPendingSince((prev) => ({ ...prev, [index]: Date.now() }));
       try {
-        const [round] = roundPda(roundId);
-        await program.methods
-          .requestReveal(index)
-          .accounts({ player: wallet.publicKey, round })
-          .rpc();
-        appendLog(`requested tile ${index}, waiting for resolver...`);
-        // Resolver settles this off-chain and submits resolve_reveal; we
-        // pick the outcome up by polling the round account below.
+        // Plain HTTP call, no wallet transaction: the resolver settles this
+        // and submits resolve_reveal itself, signed with its own key. We
+        // pick up the outcome by polling the round account below — this
+        // keeps clicking through a round to a total of 2 wallet-signed
+        // transactions (start_round, cash_out) no matter how many tiles.
+        const res = await fetch(`${RESOLVER_URL}/reveal`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ roundId: roundId.toString(), tileIndex: index }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `resolver returned ${res.status}`);
+        }
+        appendLog(`tile ${index} sent to resolver...`);
       } catch (err: any) {
         setError(`Tile ${index} request failed: ${err.message ?? err}`);
-        appendLog(`request_reveal failed: ${err.message ?? err}`);
+        appendLog(`reveal failed: ${err.message ?? err}`);
         setTiles((prev) => {
           const next = [...prev];
           next[index] = "hidden";
@@ -134,11 +149,9 @@ export function MinesGame() {
           delete next[index];
           return next;
         });
-      } finally {
-        setBusy(false);
       }
     },
-    [program, wallet.publicKey, roundId, status, tiles, appendLog],
+    [wallet.publicKey, roundId, status, tiles, appendLog],
   );
 
   const cashOut = useCallback(async () => {
@@ -278,12 +291,15 @@ export function MinesGame() {
             onChange={(e) => setMineCount(Number(e.target.value))}
             disabled={status === "active"}
           />
-          <span className="hint">
-            {mineCount} of {TOTAL_TILES} tiles are mines — next safe tile pays{" "}
-            {(fairMultiplier(1, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000)).toFixed(2)}x. More mines = bigger
-            multiplier per tile, but a much higher chance of hitting one early.
-          </span>
         </label>
+
+        <div className="mult-preview" key={mineCount} style={{ "--mult-color": riskColor(mineCount) } as any}>
+          <span className="mult-value">
+            {(fairMultiplier(1, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000)).toFixed(2)}x
+          </span>
+          <span className="mult-caption">first safe tile pays</span>
+        </div>
+
         {status !== "active" ? (
           <button onClick={startRound} disabled={busy || !program}>
             Start round

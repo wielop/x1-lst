@@ -32,9 +32,19 @@ tile. This repo instead splits responsibilities:
   every round settled under that commitment and confirm nothing was
   rewritten after the fact — the same commit-reveal trust model every
   provably-fair casino uses, just with the settlement layer on-chain instead
-  of trusting a database.
+  of trusting a database. Tile clicks reach it over plain HTTP
+  (`resolver/src/http.ts`, `POST /reveal`), not an on-chain instruction —
+  only the resolver's own `resolve_reveal` call touches the chain, so a
+  player never signs more than two transactions per round (`start_round`,
+  `cash_out`) no matter how many tiles they click.
 - **Frontend** (`web/`) is a thin client: connect wallet, start a round,
-  request tile reveals, poll round state, cash out.
+  POST tile clicks to the resolver, poll round state, cash out.
+
+The tradeoff for dropping the on-chain "I clicked this tile" record: a
+misbehaving resolver could resolve a tile nobody clicked. That can only
+affect the round it happens in — payouts always go to `round.player`
+regardless — so it's a mild griefing vector, not a fund-theft one. Worth
+revisiting if this ever handles real money.
 
 See the comment on `resolve_reveal` in `programs/mines/src/lib.rs` for the
 precise trust boundary: the program cannot verify `is_mine` itself (that
@@ -75,9 +85,15 @@ the resolver daemon:
 
 ```bash
 cd resolver && npm install
-npm run rotate-seed   # first run: creates + commits the initial seed
-npm start              # long-running: listens for RevealRequested events
+npm start   # commits the initial seed on first run, then serves the HTTP API
 ```
+
+The resolver listens on `:8787` (`RESOLVER_PORT`) by default. **The frontend
+needs to reach this from the browser**, not just from this machine — running
+`web` locally alongside it works via `localhost`, but a Vercel-hosted
+frontend needs the resolver exposed on a real public URL (tunnel, or a VPS
+like the ones already used for other bots in this account) with
+`NEXT_PUBLIC_RESOLVER_URL` pointed at it.
 
 Frontend:
 
