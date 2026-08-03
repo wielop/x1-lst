@@ -17,6 +17,7 @@ import {
 import idl from "@/lib/idl/mines.json";
 
 type TileState = "hidden" | "pending" | "safe" | "mine";
+type RoundResult = { type: "win"; payout: number; multiplier: number; mineEarned: number } | { type: "lose"; lost: number };
 
 const HOUSE_EDGE_BPS = 200; // mirrors on-chain default; overwritten once config loads
 const REVEAL_TIMEOUT_MS = 20_000; // if the resolver hasn't answered by then, something's wrong
@@ -45,6 +46,8 @@ export function MinesGame() {
   const [error, setError] = useState<string | null>(null);
   const [pendingSince, setPendingSince] = useState<Record<number, number>>({});
   const [stuckTiles, setStuckTiles] = useState<Set<number>>(new Set());
+  const [mineBalance, setMineBalance] = useState<number | null>(null);
+  const [lastResult, setLastResult] = useState<RoundResult | null>(null);
 
   const appendLog = useCallback((msg: string) => {
     setLog((prev) => [msg, ...prev].slice(0, 8));
@@ -98,6 +101,7 @@ export function MinesGame() {
       setPendingSince({});
       setStuckTiles(new Set());
       setError(null);
+      setLastResult(null);
       setStatus("active");
       appendLog(`round ${newRoundId} started, bet ${betAmount} XNT, ${mineCount} mines`);
     } catch (err: any) {
@@ -153,6 +157,29 @@ export function MinesGame() {
     [wallet.publicKey, roundId, status, tiles, appendLog],
   );
 
+  const refreshMineBalance = useCallback(async (): Promise<number | null> => {
+    if (!program || !wallet.publicKey) return null;
+    try {
+      const [config] = configPda();
+      const configAccount: any = await (program.account as any).config.fetch(config);
+      const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+      const ata = getAssociatedTokenAddressSync(configAccount.mineMint, wallet.publicKey);
+      const info = await connection.getTokenAccountBalance(ata).catch(() => null);
+      const value = info ? info.value.uiAmount ?? 0 : 0;
+      setMineBalance(value);
+      return value;
+    } catch {
+      // config not initialized yet, or RPC hiccup — leave balance as-is
+      return null;
+    }
+  }, [program, wallet.publicKey, connection]);
+
+  useEffect(() => {
+    refreshMineBalance();
+    const interval = setInterval(refreshMineBalance, 15_000);
+    return () => clearInterval(interval);
+  }, [refreshMineBalance]);
+
   const cashOut = useCallback(async () => {
     if (!program || !wallet.publicKey || roundId === null) return;
     setBusy(true);
@@ -193,13 +220,17 @@ export function MinesGame() {
 
       setStatus("cashed_out");
       appendLog(`cashed out at ${currentMultiplier.toFixed(3)}x -> ${currentPayout.toFixed(4)} XNT`);
+      const balanceBefore = mineBalance ?? 0;
+      const balanceAfter = await refreshMineBalance();
+      const mineEarned = balanceAfter !== null ? Math.max(0, balanceAfter - balanceBefore) : 0;
+      setLastResult({ type: "win", payout: currentPayout, multiplier: currentMultiplier, mineEarned });
     } catch (err: any) {
       setError(`Cash out failed: ${err.message ?? err}`);
       appendLog(`cash_out failed: ${err.message ?? err}`);
     } finally {
       setBusy(false);
     }
-  }, [program, wallet.publicKey, roundId, currentMultiplier, currentPayout, appendLog]);
+  }, [program, wallet.publicKey, roundId, currentMultiplier, currentPayout, appendLog, refreshMineBalance, mineBalance]);
 
   // Poll the round account while a round is active to pick up resolver-side
   // resolve_reveal / bust updates without needing a websocket log parser.
@@ -226,6 +257,7 @@ export function MinesGame() {
         if (roundStatus === 2) {
           setStatus("busted");
           appendLog("boom — round busted");
+          setLastResult({ type: "lose", lost: Number(betAmount) });
         }
 
         // A tile stuck in "pending" for too long means the resolver isn't
@@ -248,7 +280,7 @@ export function MinesGame() {
       }
     }, 1200);
     return () => clearInterval(interval);
-  }, [program, roundId, status, appendLog, pendingSince]);
+  }, [program, roundId, status, appendLog, pendingSince, betAmount]);
 
   const statusMessage = !wallet.publicKey
     ? "Connect a wallet to play."
@@ -266,7 +298,14 @@ export function MinesGame() {
     <div className="mines-app">
       <header>
         <h1>Mines</h1>
-        <WalletMultiButton />
+        <div className="header-right">
+          {wallet.publicKey && mineBalance !== null && (
+            <span className="mine-balance" title="Earned by cashing out with 3+ safe tiles revealed">
+              {mineBalance.toFixed(2)} $MINE
+            </span>
+          )}
+          <WalletMultiButton />
+        </div>
       </header>
 
       <p className="rules">
@@ -275,43 +314,47 @@ export function MinesGame() {
         multiplier per tile, but a shorter safe streak.
       </p>
 
-      <div className="controls">
-        <label>
-          Bet (XNT)
-          <input value={betAmount} onChange={(e) => setBetAmount(e.target.value)} disabled={status === "active"} />
-        </label>
-        <label>
-          Mines
-          <input
-            type="number"
-            min={1}
-            max={24}
-            value={mineCount}
-            onChange={(e) => setMineCount(Number(e.target.value))}
-            disabled={status === "active"}
-          />
-        </label>
+      <div className="panel">
+        <div className="controls">
+          <label>
+            Bet (XNT)
+            <input value={betAmount} onChange={(e) => setBetAmount(e.target.value)} disabled={status === "active"} />
+          </label>
+          <label>
+            Mines
+            <input
+              type="number"
+              min={1}
+              max={24}
+              value={mineCount}
+              onChange={(e) => setMineCount(Number(e.target.value))}
+              disabled={status === "active"}
+            />
+          </label>
 
-        <div className="mult-preview" key={mineCount} style={{ "--mult-color": riskColor(mineCount) } as any}>
-          <span className="mult-value">
-            {(fairMultiplier(1, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000)).toFixed(2)}x
-          </span>
-          <span className="mult-caption">first safe tile pays</span>
+          <div className="mult-preview" key={mineCount} style={{ "--mult-color": riskColor(mineCount) } as any}>
+            <span className="mult-value">
+              {(fairMultiplier(1, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000)).toFixed(2)}x
+            </span>
+            <span className="mult-caption">first safe tile pays</span>
+          </div>
+
+          {status !== "active" ? (
+            <button onClick={startRound} disabled={busy || !program}>
+              Start round
+            </button>
+          ) : (
+            <button onClick={cashOut} disabled={busy || revealedCount === 0} className="cashout">
+              Cash out {currentPayout.toFixed(4)} XNT ({currentMultiplier.toFixed(3)}x)
+            </button>
+          )}
         </div>
 
-        {status !== "active" ? (
-          <button onClick={startRound} disabled={busy || !program}>
-            Start round
-          </button>
-        ) : (
-          <button onClick={cashOut} disabled={busy || revealedCount === 0} className="cashout">
-            Cash out {currentPayout.toFixed(4)} XNT ({currentMultiplier.toFixed(3)}x)
-          </button>
-        )}
+        <p className={`status-banner status-${status}`}>{statusMessage}</p>
+        {error && <p className="error-banner">{error}</p>}
       </div>
 
-      <p className={`status-banner status-${status}`}>{statusMessage}</p>
-      {error && <p className="error-banner">{error}</p>}
+      {lastResult && <ResultBanner result={lastResult} />}
 
       <div className="grid" style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)` }}>
         {tiles.map((t, i) => (
@@ -322,7 +365,7 @@ export function MinesGame() {
             onClick={() => revealTile(i)}
             title={t === "pending" ? "waiting for resolver..." : undefined}
           >
-            {t === "safe" ? "★" : t === "mine" ? "✸" : t === "pending" ? (stuckTiles.has(i) ? "!" : "…") : ""}
+            {t === "safe" ? "💎" : t === "mine" ? "💥" : t === "pending" ? (stuckTiles.has(i) ? "!" : "…") : ""}
           </button>
         ))}
       </div>
@@ -332,6 +375,43 @@ export function MinesGame() {
           <div key={i}>{l}</div>
         ))}
       </div>
+    </div>
+  );
+}
+
+const CONFETTI_COLORS = ["#fbbf24", "#8b5cf6", "#34d399", "#fde68a", "#f472b6"];
+
+function ResultBanner({ result }: { result: RoundResult }) {
+  if (result.type === "win") {
+    const confettiPieces = Array.from({ length: 24 }, (_, i) => ({
+      left: Math.random() * 100,
+      delay: Math.random() * 0.3,
+      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+    }));
+    return (
+      <div className="result-banner win" key={`win-${result.payout}`}>
+        <div className="confetti">
+          {confettiPieces.map((p, i) => (
+            <span
+              key={i}
+              style={{ left: `${p.left}%`, animationDelay: `${p.delay}s`, background: p.color }}
+            />
+          ))}
+        </div>
+        <div className="result-headline">You cashed out</div>
+        <div className="result-amount">+{result.payout.toFixed(4)} XNT</div>
+        <div className="result-sub">at {result.multiplier.toFixed(3)}x multiplier</div>
+        {result.mineEarned > 0 && (
+          <div className="result-mine">+{result.mineEarned.toFixed(2)} $MINE earned</div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="result-banner lose" key={`lose-${result.lost}`}>
+      <div className="result-headline">Boom — hit a mine</div>
+      <div className="result-amount">-{result.lost.toFixed(4)} XNT</div>
+      <div className="result-sub">Start a new round to try again.</div>
     </div>
   );
 }
