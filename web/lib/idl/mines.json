@@ -455,6 +455,39 @@
           "type": "bool"
         }
       ]
+    },
+    {
+      "name": "updateLimits",
+      "docs": [
+        "Admin-only tuning knob: min_bet/max_bet were only settable once at",
+        "initialize_config, which forces a full re-init cycle just to react",
+        "to bankroll size changing. The payout cap (PAYOUT_CAP_DIVISOR) only",
+        "works as a rare safety net if max_bet stays small relative to the",
+        "live bankroll — this is how an operator keeps that ratio sane as the",
+        "bankroll grows or shrinks, without redeploying."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "minBet",
+          "type": "u64"
+        },
+        {
+          "name": "maxBet",
+          "type": "u64"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -933,6 +966,21 @@
         {
           "name": "paused",
           "type": "bool",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "LimitsUpdated",
+      "fields": [
+        {
+          "name": "minBet",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "maxBet",
+          "type": "u64",
           "index": false
         }
       ]

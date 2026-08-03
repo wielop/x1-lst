@@ -393,6 +393,21 @@ pub mod mines {
         emit!(PausedSet { paused });
         Ok(())
     }
+
+    /// Admin-only tuning knob: min_bet/max_bet were only settable once at
+    /// initialize_config, which forces a full re-init cycle just to react
+    /// to bankroll size changing. The payout cap (PAYOUT_CAP_DIVISOR) only
+    /// works as a rare safety net if max_bet stays small relative to the
+    /// live bankroll — this is how an operator keeps that ratio sane as the
+    /// bankroll grows or shrinks, without redeploying.
+    pub fn update_limits(ctx: Context<UpdateLimits>, min_bet: u64, max_bet: u64) -> Result<()> {
+        require!(min_bet > 0 && min_bet <= max_bet, MinesError::InvalidParam);
+        let config = &mut ctx.accounts.config;
+        config.min_bet = min_bet;
+        config.max_bet = max_bet;
+        emit!(LimitsUpdated { min_bet, max_bet });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +596,13 @@ pub struct SetPaused<'info> {
     pub config: Account<'info, Config>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateLimits<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Account<'info, Config>,
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -737,6 +759,12 @@ pub struct BankrollWithdrawn {
 #[event]
 pub struct PausedSet {
     pub paused: bool,
+}
+
+#[event]
+pub struct LimitsUpdated {
+    pub min_bet: u64,
+    pub max_bet: u64,
 }
 
 // ---------------------------------------------------------------------------
