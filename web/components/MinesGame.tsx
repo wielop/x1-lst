@@ -7,7 +7,6 @@ import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   PROGRAM_ID,
-  RESOLVER_URL,
   TOTAL_TILES,
   GRID_SIZE,
   configPda,
@@ -126,7 +125,7 @@ export function MinesGame() {
         // pick up the outcome by polling the round account below — this
         // keeps clicking through a round to a total of 2 wallet-signed
         // transactions (start_round, cash_out) no matter how many tiles.
-        const res = await fetch(`${RESOLVER_URL}/reveal`, {
+        const res = await fetch(`/api/reveal`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ roundId: roundId.toString(), tileIndex: index }),

@@ -1,7 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 
 export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.testnet.x1.xyz";
-export const RESOLVER_URL = process.env.NEXT_PUBLIC_RESOLVER_URL ?? "http://localhost:8787";
 export const PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_PROGRAM_ID ?? "5ViMkjJFgjUD9tuouTpjZ3m86jyGH8iB6h3r4Dxa4BCe",
 );
