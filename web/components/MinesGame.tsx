@@ -278,6 +278,11 @@ export function MinesGame() {
             onChange={(e) => setMineCount(Number(e.target.value))}
             disabled={status === "active"}
           />
+          <span className="hint">
+            {mineCount} of {TOTAL_TILES} tiles are mines — next safe tile pays{" "}
+            {(fairMultiplier(1, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000)).toFixed(2)}x. More mines = bigger
+            multiplier per tile, but a much higher chance of hitting one early.
+          </span>
         </label>
         {status !== "active" ? (
           <button onClick={startRound} disabled={busy || !program}>

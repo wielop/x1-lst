@@ -88,6 +88,17 @@ header h1 {
   width: 90px;
 }
 
+.controls .hint {
+  display: block;
+  width: 210px;
+  white-space: normal;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6b7686;
+  font-weight: 400;
+  margin-top: 4px;
+}
+
 .controls button {
   background: #4f6bff;
   color: white;
