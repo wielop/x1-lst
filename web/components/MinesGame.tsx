@@ -19,6 +19,7 @@ import idl from "@/lib/idl/mines.json";
 type TileState = "hidden" | "pending" | "safe" | "mine";
 
 const HOUSE_EDGE_BPS = 200; // mirrors on-chain default; overwritten once config loads
+const REVEAL_TIMEOUT_MS = 20_000; // if the resolver hasn't answered by then, something's wrong
 
 export function MinesGame() {
   const { connection } = useConnection();
@@ -33,6 +34,9 @@ export function MinesGame() {
   const [status, setStatus] = useState<"idle" | "active" | "busted" | "cashed_out">("idle");
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingSince, setPendingSince] = useState<Record<number, number>>({});
+  const [stuckTiles, setStuckTiles] = useState<Set<number>>(new Set());
 
   const appendLog = useCallback((msg: string) => {
     setLog((prev) => [msg, ...prev].slice(0, 8));
@@ -83,9 +87,13 @@ export function MinesGame() {
       setClientSeed(seed);
       setTiles(Array(TOTAL_TILES).fill("hidden"));
       setRevealedCount(0);
+      setPendingSince({});
+      setStuckTiles(new Set());
+      setError(null);
       setStatus("active");
       appendLog(`round ${newRoundId} started, bet ${betAmount} XNT, ${mineCount} mines`);
     } catch (err: any) {
+      setError(`Could not start round: ${err.message ?? err}`);
       appendLog(`start_round failed: ${err.message ?? err}`);
     } finally {
       setBusy(false);
@@ -97,11 +105,13 @@ export function MinesGame() {
       if (!program || !wallet.publicKey || roundId === null || status !== "active") return;
       if (tiles[index] !== "hidden") return;
       setBusy(true);
+      setError(null);
       setTiles((prev) => {
         const next = [...prev];
         next[index] = "pending";
         return next;
       });
+      setPendingSince((prev) => ({ ...prev, [index]: Date.now() }));
       try {
         const [round] = roundPda(roundId);
         await program.methods
@@ -112,10 +122,16 @@ export function MinesGame() {
         // Resolver settles this off-chain and submits resolve_reveal; we
         // pick the outcome up by polling the round account below.
       } catch (err: any) {
+        setError(`Tile ${index} request failed: ${err.message ?? err}`);
         appendLog(`request_reveal failed: ${err.message ?? err}`);
         setTiles((prev) => {
           const next = [...prev];
           next[index] = "hidden";
+          return next;
+        });
+        setPendingSince((prev) => {
+          const next = { ...prev };
+          delete next[index];
           return next;
         });
       } finally {
@@ -166,6 +182,7 @@ export function MinesGame() {
       setStatus("cashed_out");
       appendLog(`cashed out at ${currentMultiplier.toFixed(3)}x -> ${currentPayout.toFixed(4)} XNT`);
     } catch (err: any) {
+      setError(`Cash out failed: ${err.message ?? err}`);
       appendLog(`cash_out failed: ${err.message ?? err}`);
     } finally {
       setBusy(false);
@@ -198,12 +215,40 @@ export function MinesGame() {
           setStatus("busted");
           appendLog("boom — round busted");
         }
+
+        // A tile stuck in "pending" for too long means the resolver isn't
+        // answering (wrong program id, resolver down, etc.) — surface that
+        // instead of leaving the player staring at "…" forever.
+        const now = Date.now();
+        const stillStuck = new Set<number>();
+        for (const [idxStr, since] of Object.entries(pendingSince)) {
+          const idx = Number(idxStr);
+          if ((revealedBitmap & (1 << idx)) === 0 && now - since > REVEAL_TIMEOUT_MS) {
+            stillStuck.add(idx);
+          }
+        }
+        if (stillStuck.size > 0) {
+          setStuckTiles(stillStuck);
+          setError("The resolver isn't answering. It may be down, or pointed at a different deployment than this page — check that the resolver daemon is running and watching this program id.");
+        }
       } catch {
         // round account not found yet / RPC hiccup, ignore and retry next tick
       }
     }, 1200);
     return () => clearInterval(interval);
-  }, [program, roundId, status, appendLog]);
+  }, [program, roundId, status, appendLog, pendingSince]);
+
+  const statusMessage = !wallet.publicKey
+    ? "Connect a wallet to play."
+    : status === "idle"
+      ? "Pick a bet and a mine count, then Start round."
+      : status === "active"
+        ? revealedCount === 0
+          ? "Round started — click any tile. Safe tiles raise your multiplier; you can cash out after the first one."
+          : "Click another tile to push your multiplier higher, or cash out now to lock in the win."
+        : status === "busted"
+          ? "Hit a mine — the bet is lost. Start a new round to try again."
+          : "Cashed out. Start a new round whenever you're ready.";
 
   return (
     <div className="mines-app">
@@ -211,6 +256,12 @@ export function MinesGame() {
         <h1>Mines</h1>
         <WalletMultiButton />
       </header>
+
+      <p className="rules">
+        Grid of {TOTAL_TILES} tiles, some hidden as mines. Reveal tiles one at a time — each safe one raises your
+        payout multiplier. Cash out any time, or lose the bet if you hit a mine. More mines chosen = higher
+        multiplier per tile, but a shorter safe streak.
+      </p>
 
       <div className="controls">
         <label>
@@ -239,15 +290,19 @@ export function MinesGame() {
         )}
       </div>
 
+      <p className={`status-banner status-${status}`}>{statusMessage}</p>
+      {error && <p className="error-banner">{error}</p>}
+
       <div className="grid" style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)` }}>
         {tiles.map((t, i) => (
           <button
             key={i}
-            className={`tile ${t}`}
+            className={`tile ${t}${stuckTiles.has(i) ? " stuck" : ""}`}
             disabled={busy || status !== "active" || t !== "hidden"}
             onClick={() => revealTile(i)}
+            title={t === "pending" ? "waiting for resolver..." : undefined}
           >
-            {t === "safe" ? "★" : t === "mine" ? "✸" : t === "pending" ? "…" : ""}
+            {t === "safe" ? "★" : t === "mine" ? "✸" : t === "pending" ? (stuckTiles.has(i) ? "!" : "…") : ""}
           </button>
         ))}
       </div>

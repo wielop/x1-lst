@@ -27,12 +27,48 @@ header h1 {
   letter-spacing: 0.02em;
 }
 
+.rules {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #93a0b4;
+  margin: 0 0 20px;
+}
+
 .controls {
   display: flex;
   gap: 12px;
   align-items: flex-end;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
+}
+
+.status-banner {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #161b26;
+  border: 1px solid #2a3242;
+  margin: 0 0 12px;
+}
+
+.status-banner.status-busted {
+  border-color: #ef4444;
+  color: #f87171;
+}
+
+.status-banner.status-cashed_out {
+  border-color: #22c55e;
+  color: #4ade80;
+}
+
+.error-banner {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #3a1414;
+  border: 1px solid #ef4444;
+  color: #f87171;
+  margin: 0 0 12px;
 }
 
 .controls label {
@@ -96,6 +132,13 @@ header h1 {
 .tile.pending {
   background: #24304a;
   animation: pulse 0.9s infinite ease-in-out;
+}
+
+.tile.pending.stuck {
+  background: #3a1414;
+  border-color: #ef4444;
+  color: #f87171;
+  animation: none;
 }
 
 .tile.safe {
