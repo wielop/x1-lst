@@ -6,10 +6,12 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "rotate-seed": "tsx src/rotateSeed.ts",
-    "reveal-seed": "tsx src/revealSeed.ts"
+    "reveal-seed": "tsx src/revealSeed.ts",
+    "init-config": "tsx src/initializeConfig.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.28.0",
+    "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.3",
     "dotenv": "^16.4.5"
   },

@@ -4,6 +4,14 @@
   "instructions": [
     {
       "name": "initializeConfig",
+      "docs": [
+        "Step 1/3 of admin setup: creates Config and the native-lamport vault.",
+        "Split into three instructions (see `initialize_mint`,",
+        "`initialize_pools`) purely to stay under the BPF 4KB stack frame —",
+        "validating every account (config + mint + two token accounts) in one",
+        "instruction overflows the stack at runtime even though each",
+        "individual function's static frame looks fine in isolation."
+      ],
       "accounts": [
         {
           "name": "admin",
@@ -17,32 +25,7 @@
         },
         {
           "name": "vault",
-          "isMut": false,
-          "isSigner": false
-        },
-        {
-          "name": "mintAuthority",
-          "isMut": false,
-          "isSigner": false
-        },
-        {
-          "name": "mineMint",
           "isMut": true,
-          "isSigner": false
-        },
-        {
-          "name": "leaderboardPool",
-          "isMut": true,
-          "isSigner": true
-        },
-        {
-          "name": "rakebackPool",
-          "isMut": true,
-          "isSigner": true
-        },
-        {
-          "name": "tokenProgram",
-          "isMut": false,
           "isSigner": false
         },
         {
@@ -73,6 +56,90 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "initializeMint",
+      "docs": [
+        "Step 2/3 of admin setup: creates the $MINE mint (PDA-owned authority)."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initializePools",
+      "docs": [
+        "Step 3/3 of admin setup: creates the leaderboard and rakeback $MINE",
+        "token accounts that cash_out mints emission into."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "leaderboardPool",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "rakebackPool",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": []
     },
     {
       "name": "commitSeed",
@@ -546,6 +613,26 @@
             "name": "status",
             "type": "u8"
           },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vault",
+      "docs": [
+        "Program-owned holder of the native-lamport bankroll. Carries no real data",
+        "— it exists purely so the vault PDA is owned by this program, which is",
+        "required for cash_out/withdraw_bankroll to debit its lamports directly",
+        "(the runtime only allows a program to decrease an account's balance via",
+        "pointer arithmetic if that program owns the account; crediting it, e.g.",
+        "player deposits, has no such restriction)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
             "name": "bump",
             "type": "u8"

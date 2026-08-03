@@ -5,7 +5,7 @@ seeds = false
 skip-lint = false
 
 [programs.testnet]
-mines = "7oa9Ho5HqYEyyBmRmwh7gnUEtDjkKPGaGFcomXkDiwuy"
+mines = "5ViMkjJFgjUD9tuouTpjZ3m86jyGH8iB6h3r4Dxa4BCe"
 
 [registry]
 url = "https://api.apr.dev"

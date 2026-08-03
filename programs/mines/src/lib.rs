@@ -5,7 +5,7 @@ use anchor_lang::solana_program::system_instruction;
 use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount};
 use anchor_spl::associated_token::AssociatedToken;
 
-declare_id!("7oa9Ho5HqYEyyBmRmwh7gnUEtDjkKPGaGFcomXkDiwuy");
+declare_id!("5ViMkjJFgjUD9tuouTpjZ3m86jyGH8iB6h3r4Dxa4BCe");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -58,6 +58,12 @@ pub const ROUND_SEED: &[u8] = b"round";
 pub mod mines {
     use super::*;
 
+    /// Step 1/3 of admin setup: creates Config and the native-lamport vault.
+    /// Split into three instructions (see `initialize_mint`,
+    /// `initialize_pools`) purely to stay under the BPF 4KB stack frame —
+    /// validating every account (config + mint + two token accounts) in one
+    /// instruction overflows the stack at runtime even though each
+    /// individual function's static frame looks fine in isolation.
     pub fn initialize_config(
         ctx: Context<InitializeConfig>,
         resolver_authority: Pubkey,
@@ -73,9 +79,9 @@ pub mod mines {
         config.admin = ctx.accounts.admin.key();
         config.resolver_authority = resolver_authority;
         config.treasury_authority = treasury_authority;
-        config.mine_mint = ctx.accounts.mine_mint.key();
-        config.leaderboard_pool = ctx.accounts.leaderboard_pool.key();
-        config.rakeback_pool = ctx.accounts.rakeback_pool.key();
+        config.mine_mint = Pubkey::default();
+        config.leaderboard_pool = Pubkey::default();
+        config.rakeback_pool = Pubkey::default();
         config.house_edge_bps = house_edge_bps;
         config.min_bet = min_bet;
         config.max_bet = max_bet;
@@ -86,7 +92,8 @@ pub mod mines {
         config.paused = false;
         config.bump = ctx.bumps["config"];
         config.vault_bump = ctx.bumps["vault"];
-        config.mint_authority_bump = ctx.bumps["mint_authority"];
+        config.mint_authority_bump = 0;
+        ctx.accounts.vault.bump = ctx.bumps["vault"];
 
         emit!(ConfigInitialized {
             admin: config.admin,
@@ -97,6 +104,23 @@ pub mod mines {
             min_bet,
             max_bet,
         });
+        Ok(())
+    }
+
+    /// Step 2/3 of admin setup: creates the $MINE mint (PDA-owned authority).
+    pub fn initialize_mint(ctx: Context<InitializeMint>) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.mine_mint = ctx.accounts.mine_mint.key();
+        config.mint_authority_bump = ctx.bumps["mint_authority"];
+        Ok(())
+    }
+
+    /// Step 3/3 of admin setup: creates the leaderboard and rakeback $MINE
+    /// token accounts that cash_out mints emission into.
+    pub fn initialize_pools(ctx: Context<InitializePools>) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.leaderboard_pool = ctx.accounts.leaderboard_pool.key();
+        config.rakeback_pool = ctx.accounts.rakeback_pool.key();
         Ok(())
     }
 
@@ -253,7 +277,7 @@ pub mod mines {
         require!(round.revealed_count > 0, MinesError::NothingToCashOut);
 
         let config = &ctx.accounts.config;
-        let vault_lamports = ctx.accounts.vault.lamports();
+        let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
 
         let fair_m = fair_multiplier_scaled(round.revealed_count, round.mine_count, TOTAL_TILES)?;
         let house_m = fair_m
@@ -374,7 +398,7 @@ pub mod mines {
 
     pub fn withdraw_bankroll(ctx: Context<WithdrawBankroll>, amount: u64) -> Result<()> {
         require!(amount > 0, MinesError::InvalidParam);
-        require!(ctx.accounts.vault.lamports() >= amount, MinesError::InsufficientBankroll);
+        require!(ctx.accounts.vault.to_account_info().lamports() >= amount, MinesError::InsufficientBankroll);
         **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.treasury_authority.to_account_info().try_borrow_mut_lamports()? += amount;
         emit!(BankrollWithdrawn { treasury_authority: ctx.accounts.treasury_authority.key(), amount });
@@ -400,9 +424,24 @@ pub struct InitializeConfig<'info> {
     #[account(init, payer = admin, space = Config::LEN, seeds = [CONFIG_SEED], bump)]
     pub config: Box<Account<'info, Config>>,
 
-    /// CHECK: native-lamport vault PDA, no account data, funded lazily by transfers.
-    #[account(seeds = [VAULT_SEED], bump)]
-    pub vault: UncheckedAccount<'info>,
+    // Must be `init` (program-owned), not a bare System-owned PDA: the
+    // runtime only allows a program to *debit* an account's lamports via
+    // direct pointer arithmetic (as cash_out/withdraw_bankroll do) if that
+    // program owns the account. Crediting it (player deposits) works either
+    // way, but a System-owned vault would make every payout fail at runtime.
+    #[account(init, payer = admin, space = Vault::LEN, seeds = [VAULT_SEED], bump)]
+    pub vault: Account<'info, Vault>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeMint<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: signer-only PDA used to authorize $MINE mint_to CPIs.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
@@ -416,6 +455,21 @@ pub struct InitializeConfig<'info> {
         seeds = [MINT_SEED],
         bump
     )]
+    pub mine_mint: Box<Account<'info, Mint>>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitializePools<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(address = config.mine_mint)]
     pub mine_mint: Box<Account<'info, Mint>>,
 
     #[account(init, payer = admin, token::mint = mine_mint, token::authority = config)]
@@ -451,9 +505,8 @@ pub struct StartRound<'info> {
     #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
 
-    /// CHECK: native-lamport vault PDA.
     #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
-    pub vault: UncheckedAccount<'info>,
+    pub vault: Account<'info, Vault>,
 
     #[account(
         init,
@@ -491,9 +544,8 @@ pub struct CashOut<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
 
-    /// CHECK: native-lamport vault PDA.
     #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
-    pub vault: UncheckedAccount<'info>,
+    pub vault: Account<'info, Vault>,
 
     #[account(mut, has_one = player, seeds = [ROUND_SEED, &round.round_id.to_le_bytes()], bump = round.bump)]
     pub round: Box<Account<'info, Round>>,
@@ -528,9 +580,8 @@ pub struct CashOut<'info> {
 pub struct DepositBankroll<'info> {
     #[account(mut)]
     pub funder: Signer<'info>,
-    /// CHECK: native-lamport vault PDA.
     #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
-    pub vault: UncheckedAccount<'info>,
+    pub vault: Account<'info, Vault>,
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
     pub system_program: Program<'info, System>,
@@ -542,9 +593,8 @@ pub struct WithdrawBankroll<'info> {
     pub treasury_authority: Signer<'info>,
     #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = treasury_authority)]
     pub config: Account<'info, Config>,
-    /// CHECK: native-lamport vault PDA.
     #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
-    pub vault: UncheckedAccount<'info>,
+    pub vault: Account<'info, Vault>,
     pub system_program: Program<'info, System>,
 }
 
@@ -608,6 +658,21 @@ pub struct Round {
 
 impl Round {
     pub const LEN: usize = 8 + 32 + 8 + 8 + 1 + 32 + 32 + 4 + 4 + 1 + 1 + 1;
+}
+
+/// Program-owned holder of the native-lamport bankroll. Carries no real data
+/// — it exists purely so the vault PDA is owned by this program, which is
+/// required for cash_out/withdraw_bankroll to debit its lamports directly
+/// (the runtime only allows a program to decrease an account's balance via
+/// pointer arithmetic if that program owns the account; crediting it, e.g.
+/// player deposits, has no such restriction).
+#[account]
+pub struct Vault {
+    pub bump: u8,
+}
+
+impl Vault {
+    pub const LEN: usize = 8 + 1;
 }
 
 // ---------------------------------------------------------------------------
