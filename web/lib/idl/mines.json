@@ -1,0 +1,985 @@
+{
+  "version": "0.1.0",
+  "name": "mines",
+  "instructions": [
+    {
+      "name": "initializeConfig",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "vault",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "leaderboardPool",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "rakebackPool",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "resolverAuthority",
+          "type": "publicKey"
+        },
+        {
+          "name": "treasuryAuthority",
+          "type": "publicKey"
+        },
+        {
+          "name": "houseEdgeBps",
+          "type": "u16"
+        },
+        {
+          "name": "minBet",
+          "type": "u64"
+        },
+        {
+          "name": "maxBet",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "commitSeed",
+      "docs": [
+        "Resolver publishes hash(server_seed) *before* any round that will use",
+        "it is allowed to start. Rounds record which commitment they were",
+        "opened under; the raw seed is revealed later via `reveal_seed` so",
+        "anyone can recompute every round settled under that commitment and",
+        "confirm the resolver never rewrote history."
+      ],
+      "accounts": [
+        {
+          "name": "resolverAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "seedHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "revealSeed",
+      "docs": [
+        "Publishes the raw seed behind a retired commitment for public audit."
+      ],
+      "accounts": [
+        {
+          "name": "resolverAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "rawSeed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "committedHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "startRound",
+      "accounts": [
+        {
+          "name": "player",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "round",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "betAmount",
+          "type": "u64"
+        },
+        {
+          "name": "mineCount",
+          "type": "u8"
+        },
+        {
+          "name": "clientSeed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "requestReveal",
+      "docs": [
+        "Cheap, player-signed on-chain intent: \"I want tile N revealed.\"",
+        "Keeps a public audit trail of exactly which tile was actually",
+        "requested, so the resolver can't quietly reveal tiles no one asked for."
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "round",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "tileIndex",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "resolveReveal",
+      "docs": [
+        "Resolver-signed settlement of a previously requested tile. The",
+        "resolver derives `is_mine` off-chain from its secret server seed;",
+        "this program does not (and structurally cannot, without leaking mine",
+        "positions through readable account data) verify the mine layout",
+        "itself. Fairness is enforced after the fact via `commit_seed` /",
+        "`reveal_seed`, not verified live on-chain — same trust model used by",
+        "every provably-fair off-chain-resolved casino game."
+      ],
+      "accounts": [
+        {
+          "name": "resolverAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "round",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "tileIndex",
+          "type": "u8"
+        },
+        {
+          "name": "isMine",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "cashOut",
+      "accounts": [
+        {
+          "name": "player",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "round",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "playerMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "leaderboardPool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "rakebackPool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "associatedTokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "depositBankroll",
+      "accounts": [
+        {
+          "name": "funder",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdrawBankroll",
+      "accounts": [
+        {
+          "name": "treasuryAuthority",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "setPaused",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "publicKey"
+          },
+          {
+            "name": "resolverAuthority",
+            "type": "publicKey"
+          },
+          {
+            "name": "treasuryAuthority",
+            "type": "publicKey"
+          },
+          {
+            "name": "mineMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "leaderboardPool",
+            "type": "publicKey"
+          },
+          {
+            "name": "rakebackPool",
+            "type": "publicKey"
+          },
+          {
+            "name": "houseEdgeBps",
+            "type": "u16"
+          },
+          {
+            "name": "minBet",
+            "type": "u64"
+          },
+          {
+            "name": "maxBet",
+            "type": "u64"
+          },
+          {
+            "name": "cumulativeVolume",
+            "type": "u64"
+          },
+          {
+            "name": "totalRounds",
+            "type": "u64"
+          },
+          {
+            "name": "currentSeedHash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seedNonce",
+            "type": "u64"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vaultBump",
+            "type": "u8"
+          },
+          {
+            "name": "mintAuthorityBump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Round",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "publicKey"
+          },
+          {
+            "name": "roundId",
+            "type": "u64"
+          },
+          {
+            "name": "betAmount",
+            "type": "u64"
+          },
+          {
+            "name": "mineCount",
+            "type": "u8"
+          },
+          {
+            "name": "clientSeed",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seedCommitment",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "requestedBitmap",
+            "type": "u32"
+          },
+          {
+            "name": "revealedBitmap",
+            "type": "u32"
+          },
+          {
+            "name": "revealedCount",
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "RoundStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "CashedOut"
+          },
+          {
+            "name": "Busted"
+          }
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "ConfigInitialized",
+      "fields": [
+        {
+          "name": "admin",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "resolverAuthority",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "treasuryAuthority",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "mineMint",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "houseEdgeBps",
+          "type": "u16",
+          "index": false
+        },
+        {
+          "name": "minBet",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "maxBet",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "SeedCommitted",
+      "fields": [
+        {
+          "name": "seedHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "previousHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "nonce",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "slot",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "SeedRevealed",
+      "fields": [
+        {
+          "name": "committedHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "rawSeed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "slot",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "RoundStarted",
+      "fields": [
+        {
+          "name": "round",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "roundId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "betAmount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineCount",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "seedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "RevealRequested",
+      "fields": [
+        {
+          "name": "round",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "roundId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "tileIndex",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "clientSeed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "seedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "RevealResolved",
+      "fields": [
+        {
+          "name": "round",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "roundId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "tileIndex",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "revealedCount",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "multiplierScaled",
+          "type": "u128",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "RoundBusted",
+      "fields": [
+        {
+          "name": "round",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "roundId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "tileIndex",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "revealedCount",
+          "type": "u8",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "CashedOut",
+      "fields": [
+        {
+          "name": "round",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "roundId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "revealedCount",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "payout",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineMintedPlayer",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineMintedLeaderboard",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineMintedRakeback",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "BankrollDeposited",
+      "fields": [
+        {
+          "name": "funder",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "BankrollWithdrawn",
+      "fields": [
+        {
+          "name": "treasuryAuthority",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "PausedSet",
+      "fields": [
+        {
+          "name": "paused",
+          "type": "bool",
+          "index": false
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "MathOverflow",
+      "msg": "math overflow"
+    },
+    {
+      "code": 6001,
+      "name": "Paused",
+      "msg": "game is paused"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidMineCount",
+      "msg": "mine count out of range"
+    },
+    {
+      "code": 6003,
+      "name": "BetOutOfRange",
+      "msg": "bet amount out of configured range"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidTileIndex",
+      "msg": "tile index out of range"
+    },
+    {
+      "code": 6005,
+      "name": "TileAlreadyHandled",
+      "msg": "tile was already requested or revealed"
+    },
+    {
+      "code": 6006,
+      "name": "TileNotRequested",
+      "msg": "tile was not requested before resolve"
+    },
+    {
+      "code": 6007,
+      "name": "RoundNotActive",
+      "msg": "round is not active"
+    },
+    {
+      "code": 6008,
+      "name": "NothingToCashOut",
+      "msg": "no safe tiles revealed yet, nothing to cash out"
+    },
+    {
+      "code": 6009,
+      "name": "SeedMismatch",
+      "msg": "revealed raw seed does not match its committed hash"
+    },
+    {
+      "code": 6010,
+      "name": "NoSeedCommitted",
+      "msg": "no seed has been committed yet"
+    },
+    {
+      "code": 6011,
+      "name": "InvalidParam",
+      "msg": "invalid instruction parameter"
+    },
+    {
+      "code": 6012,
+      "name": "InsufficientBankroll",
+      "msg": "bankroll has insufficient balance"
+    }
+  ]
+}

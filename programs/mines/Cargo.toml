@@ -1,0 +1,26 @@
+[package]
+name = "mines"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "mines"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = { version = "0.28.0", features = ["init-if-needed"] }
+anchor-spl = { version = "0.28.0", features = ["token", "associated_token"] }
+
+# Pinned only to force the resolver away from newer releases that require
+# the edition2024 Cargo feature, which Solana 1.18's bundled cargo (1.75)
+# can't parse. See the comment on the blake3/zeroize_derive pins in
+# ../../Cargo.toml for the full story — same root cause, different crate.
+indexmap = "=2.2.6"
+getrandom = "=0.2.15"

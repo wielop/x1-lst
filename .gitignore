@@ -21,3 +21,6 @@ keys/
 *-keypair.json
 *.keypair.json
 id.json
+
+# resolver's secret server seeds — commit hashes go on-chain, raw seeds never do
+resolver/seed-store*.json
