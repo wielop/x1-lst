@@ -5,7 +5,16 @@ import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { PROGRAM_ID, stakingPoolPda, stakingAuthorityPda, rewardVaultPda, stakeTokenVaultPda, positionPda } from "@/lib/config";
+import {
+  PROGRAM_ID,
+  stakingPoolPda,
+  stakingAuthorityPda,
+  rewardVaultPda,
+  stakeTokenVaultPda,
+  positionPda,
+  poolXntVaultPda,
+  poolMineVaultPda,
+} from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
 const ACC_REWARD_SCALE = 1_000_000_000_000n;
@@ -75,6 +84,12 @@ export function StakingPanel() {
   // Per-position last-claim record, populated only from actions taken in
   // THIS session (not fetched history) — honest about what it actually is.
   const [lastClaims, setLastClaims] = useState<Record<string, { amount: number; ts: number }>>({});
+  // Pool-wide stats (every wallet's positions, not just the connected
+  // one) — mirrors the "Pool Statistics" panel style from the
+  // staging-vero.x1.xyz staking reference.
+  const [poolStats, setPoolStats] = useState<{ tvlMine: number; tvlXnt: number; totalStakers: number } | null>(
+    null,
+  );
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -107,6 +122,34 @@ export function StakingPanel() {
       const [rewardVault] = rewardVaultPda();
       const rewardVaultInfo = await connection.getAccountInfo(rewardVault).catch(() => null);
       setRewardPoolXnt(rewardVaultInfo ? rewardVaultInfo.lamports / 1e9 : 0);
+
+      // Pool-wide: every position on the program, not just this wallet's —
+      // needed for Total Value Locked / Total Stakers. TVL only counts
+      // still-active Lock principal (Burn destroyed its tokens, so there's
+      // no "value" left to count there), converted to an XNT-equivalent
+      // via the AMM's live spot price for a TVL figure comparable to the
+      // staging-vero reference (which stakes a single asset, XNT itself).
+      const [allRaw, xntVaultInfo, mineVaultBal] = await Promise.all([
+        (program.account as any).position.all() as Promise<any[]>,
+        connection.getAccountInfo(poolXntVaultPda()[0]).catch(() => null),
+        connection.getTokenAccountBalance(poolMineVaultPda()[0]).catch(() => null),
+      ]);
+      const reserveXnt = xntVaultInfo ? xntVaultInfo.lamports : 0;
+      const reserveMine = mineVaultBal ? Number(mineVaultBal.value.amount) : 0;
+      const mineToXnt = reserveMine > 0 ? reserveXnt / reserveMine : 0;
+
+      let tvlMineRaw = 0;
+      const stakerSet = new Set<string>();
+      for (const r of allRaw) {
+        const acc = r.account;
+        if (acc.expired) continue;
+        stakerSet.add(acc.owner.toBase58());
+        if (acc.kind.lock !== undefined) {
+          tvlMineRaw += Number(acc.amount.toString());
+        }
+      }
+      const tvlMine = tvlMineRaw / 1e6;
+      setPoolStats({ tvlMine, tvlXnt: (tvlMineRaw * mineToXnt) / 1e9, totalStakers: stakerSet.size });
 
       if (wallet.publicKey) {
         const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
@@ -186,6 +229,16 @@ export function StakingPanel() {
   const poolAccrualXntPerHour =
     recentAccrualPerWeightPerHour != null && poolData
       ? recentAccrualPerWeightPerHour * Number(poolData.totalWeight)
+      : null;
+
+  // Estimated APY, same "recent observed rate" honesty as
+  // poolAccrualXntPerHour — annualized reward flow against TVL's
+  // XNT-equivalent value. Needs a real, nonzero AMM price to mean
+  // anything (division by tvlXnt), so null (shown as "-") until both the
+  // rate and a priced TVL exist.
+  const estimatedApyPct =
+    poolAccrualXntPerHour != null && poolStats && poolStats.tvlXnt > 0
+      ? ((poolAccrualXntPerHour * 24 * 365) / poolStats.tvlXnt) * 100
       : null;
 
   const totalPendingYield = useMemo(
@@ -382,6 +435,31 @@ export function StakingPanel() {
       {poolData && (
         <>
           <div className="panel stake-stats">
+            <div className="stake-stat-header">Pool statistics</div>
+            <div className="stake-stat">
+              <span className="stake-stat-label">Total value locked</span>
+              <span className="stake-stat-value">{(poolStats?.tvlMine ?? 0).toFixed(2)} $MINE</span>
+              <span className="stake-stat-sub">
+                {poolStats ? `≈ ${poolStats.tvlXnt.toFixed(5)} XNT` : "..."}
+              </span>
+            </div>
+            <div className="stake-stat">
+              <span className="stake-stat-label">Total stakers</span>
+              <span className="stake-stat-value">{poolStats?.totalStakers ?? "-"}</span>
+            </div>
+            <div className="stake-stat">
+              <span className="stake-stat-label">Estimated APY</span>
+              <span className="stake-stat-value gold">{estimatedApyPct != null ? `${estimatedApyPct.toFixed(2)}%` : "-"}</span>
+              <span className="stake-stat-sub">based on recent rate</span>
+            </div>
+            <div className="stake-stat">
+              <span className="stake-stat-label">Total weight (pool)</span>
+              <span className="stake-stat-value">{(Number(poolData.totalWeight) / 1e6).toFixed(1)}</span>
+            </div>
+          </div>
+
+          <div className="panel stake-stats">
+            <div className="stake-stat-header">Your position</div>
             <div className="stake-stat">
               <span className="stake-stat-label">Reward pool (XNT)</span>
               <span className="stake-stat-value gold">{(rewardPoolXnt ?? 0).toFixed(5)} XNT</span>
@@ -403,10 +481,6 @@ export function StakingPanel() {
               <span className="stake-stat-sub">
                 {lastUpdated ? `updated ${Math.max(0, Math.floor((nowTick - lastUpdated) / 1000))}s ago` : "..."}
               </span>
-            </div>
-            <div className="stake-stat">
-              <span className="stake-stat-label">Total weight (pool)</span>
-              <span className="stake-stat-value">{(Number(poolData.totalWeight) / 1e6).toFixed(1)}</span>
             </div>
           </div>
 

@@ -622,18 +622,28 @@ header h1::before {
   content: "\1F510  ";
 }
 
+.stake-stat-header {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8f88ad;
+  margin-bottom: 4px;
+}
+
 .stake-stats {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 14px 10px;
 }
 
 .stake-stat {
   display: flex;
   flex-direction: column;
   align-items: center;
-  flex: 1;
   gap: 4px;
+  text-align: center;
 }
 
 .stake-stat-label {
