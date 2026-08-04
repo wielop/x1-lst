@@ -894,3 +894,79 @@ header h1::before {
   0% { transform: scale(0.6); opacity: 0; }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* --- Wykop multi-dig list --- */
+.dig-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.dig-row-wrap {
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(20, 16, 38, 0.5);
+}
+
+.dig-row-wrap.expanded {
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.dig-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #e8e4fb;
+  font: inherit;
+  text-align: left;
+}
+
+.dig-row-tier {
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--gold-bright);
+  white-space: nowrap;
+}
+
+.dig-row-status {
+  font-size: 13px;
+  font-weight: 600;
+  color: #b7b0d6;
+  white-space: nowrap;
+}
+
+.dig-row.status-revealing .dig-row-status {
+  color: var(--gold-bright);
+  animation: liveDotPulse 1s infinite;
+}
+
+.dig-row.status-error .dig-row-status {
+  color: #f87171;
+}
+
+.dig-row-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.15);
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.dig-row-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--violet), var(--gold));
+  transition: width 300ms linear;
+}
+
+.dig-row-caret {
+  color: #8f88ad;
+  font-size: 12px;
+}

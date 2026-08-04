@@ -19,13 +19,35 @@ import {
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
-type Status = "idle" | "digging" | "resolving" | "revealing" | "done";
+type SessionStatus = "digging" | "resolving" | "revealing" | "done" | "error";
 type RarityInfo = { rewardBps: number; baseChanceBps: number; durationScaling: number[] };
 type DigResult = { rarityHit: number; mineEarned: number } | null;
 type Particle = { id: number; left: number; emoji: string; big: boolean };
 type Popup = { id: number; amount: number };
 
+type DigSessionState = {
+  sessionId: bigint;
+  durationTier: number;
+  status: SessionStatus;
+  startTs: number; // ms epoch
+  totalDuration: number; // seconds
+  floorEstimate: number;
+  crystalsShown: number;
+  strikeIncrements: number[];
+  strikeIndex: number;
+  nextStrikeAt: number; // ms epoch
+  particles: Particle[];
+  popups: Popup[];
+  strikeKey: number;
+  result: DigResult;
+  revealUntil: number; // ms epoch, valid once status === "revealing"
+  error: string | null;
+  expanded: boolean;
+};
+
 const STRIKE_MS = 4000;
+const REVEAL_MS = 2300;
+const TICK_MS = 250;
 
 /** Splits `total` into `n` positive, deliberately UNEVEN chunks that sum to
  * `total` — each pickaxe strike lands a different-sized chunk instead of a
@@ -40,13 +62,64 @@ function unevenSplit(total: number, n: number): number[] {
 
 const RARITY_NAMES = ["Rare", "Epic", "Legendary", "Mythic", "Tier 5", "Tier 6", "Tier 7", "Tier 8"];
 const RARITY_COLORS = ["#60a5fa", "#c084fc", "#fbbf24", "#f472b6"];
-// How many recent sessions to scan on mount looking for one this wallet
-// still has open — see resumeActiveSession below.
-const RESUME_SCAN_WINDOW = 15;
+// How many recent (globally-numbered) sessions to scan on mount looking for
+// ones this wallet still has open — see the resume effect below. Session
+// ids are global across all players, not per-wallet, so this is a
+// best-effort window, same limitation the single-session version had.
+const RESUME_SCAN_WINDOW = 30;
+
+let particleIdCounter = 0;
+let popupIdCounter = 0;
 
 function effectiveChancePct(tier: RarityInfo, durationTier: number): number {
   const scaling = tier.durationScaling[durationTier] ?? 0;
   return (tier.baseChanceBps * scaling) / 10_000 / 100;
+}
+
+function buildSessionState(
+  sessionId: bigint,
+  durationTier: number,
+  totalDuration: number,
+  startTs: number,
+  floorEstimate: number,
+  expanded: boolean,
+): DigSessionState {
+  const now = Date.now();
+  const elapsedMs = Math.max(0, now - startTs);
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  const pastDuration = totalDuration > 0 && elapsedSec >= totalDuration;
+
+  const initialShown = pastDuration
+    ? floorEstimate
+    : totalDuration > 0
+      ? Math.min(floorEstimate, (floorEstimate * elapsedSec) / totalDuration)
+      : 0;
+
+  const totalTicks = Math.max(1, Math.round((totalDuration * 1000) / STRIKE_MS));
+  const ticksElapsed = Math.min(totalTicks, Math.floor(elapsedMs / STRIKE_MS));
+  const remainingTicks = Math.max(0, totalTicks - ticksElapsed);
+  const remainingTotal = Math.max(0, floorEstimate - initialShown);
+  const strikeIncrements = pastDuration ? [] : unevenSplit(remainingTotal, Math.max(1, remainingTicks));
+
+  return {
+    sessionId,
+    durationTier,
+    status: pastDuration ? "resolving" : "digging",
+    startTs,
+    totalDuration,
+    floorEstimate,
+    crystalsShown: initialShown,
+    strikeIncrements,
+    strikeIndex: 0,
+    nextStrikeAt: now + STRIKE_MS,
+    particles: [],
+    popups: [],
+    strikeKey: 0,
+    result: null,
+    revealUntil: 0,
+    error: null,
+    expanded,
+  };
 }
 
 export function WykopGame() {
@@ -55,24 +128,12 @@ export function WykopGame() {
 
   const [durationTier, setDurationTier] = useState(0);
   const [digConfigData, setDigConfigData] = useState<any>(null);
-  const [status, setStatus] = useState<Status>("idle");
-  const [sessionId, setSessionId] = useState<bigint | null>(null);
-  const [secondsLeft, setSecondsLeft] = useState(0);
-  const [totalDuration, setTotalDuration] = useState(0);
-  const [crystalsShown, setCrystalsShown] = useState(0);
-  const [floorEstimate, setFloorEstimate] = useState(0);
-  const [particles, setParticles] = useState<Particle[]>([]);
-  const [popups, setPopups] = useState<Popup[]>([]);
-  const [strikeKey, setStrikeKey] = useState(0);
+  const [sessions, setSessions] = useState<Record<string, DigSessionState>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mineBalance, setMineBalance] = useState<number | null>(null);
-  const [result, setResult] = useState<DigResult>(null);
   const [resuming, setResuming] = useState(true);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const strikeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const particleIdRef = useRef(0);
-  const popupIdRef = useRef(0);
+  const resolvingRef = useRef<Set<string>>(new Set());
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -129,10 +190,11 @@ export function WykopGame() {
   }, [refreshMineBalance]);
 
   // Switching away to another tab (Mines/Stake) and back used to reset this
-  // component entirely — the on-chain dig session (and the XNT already
-  // paid for it) was never actually lost, but the UI had no way to find it
-  // again. On mount, scan this wallet's most recent sessions for one still
-  // Active and pick up tracking it instead of silently starting from idle.
+  // component entirely — on-chain dig sessions (and the XNT already paid
+  // for them) were never actually lost, but the UI had no way to find them
+  // again. On mount, scan this wallet's most recent sessions for ALL still
+  // Active ones and pick up tracking every one of them — a player can run
+  // several digs at once, so this no longer stops at the first match.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -144,6 +206,7 @@ export function WykopGame() {
 
         const total = BigInt(cfg.totalSessions.toString());
         const start = total > BigInt(RESUME_SCAN_WINDOW) ? total - BigInt(RESUME_SCAN_WINDOW) : 0n;
+        const found: DigSessionState[] = [];
         for (let id = total - 1n; id >= start && id >= 0n; id--) {
           const [session] = digSessionPda(id);
           const acc: any = await (program.account as any).digSession.fetch(session).catch(() => null);
@@ -151,25 +214,20 @@ export function WykopGame() {
           if (acc.status !== 0) continue; // not Active
           if (!acc.player.equals(wallet.publicKey)) continue;
 
-          if (cancelled) return;
           const duration = cfg.tierDurations[acc.durationTier];
-          const elapsed = Math.floor(Date.now() / 1000) - Number(acc.startTs);
           const betAmount = BigInt(cfg.tierPrices[acc.durationTier].toString());
           const floor = await fetchFloorEstimate(program, connection, betAmount);
           if (cancelled) return;
-          setSessionId(id);
-          setDurationTier(acc.durationTier);
-          setTotalDuration(duration);
-          setFloorEstimate(floor);
-          if (elapsed >= duration) {
-            setSecondsLeft(0);
-            setCrystalsShown(floor);
-            setStatus("resolving");
-          } else {
-            setSecondsLeft(duration - elapsed);
-            setStatus("digging");
-          }
-          return;
+          found.push(buildSessionState(id, acc.durationTier, duration, Number(acc.startTs) * 1000, floor, false));
+        }
+        if (cancelled) return;
+        if (found.length > 0) {
+          found[0].expanded = true;
+          setSessions((prev) => {
+            const next = { ...prev };
+            for (const s of found) next[s.sessionId.toString()] = s;
+            return next;
+          });
         }
       } finally {
         if (!cancelled) setResuming(false);
@@ -187,7 +245,6 @@ export function WykopGame() {
     if (!program || !wallet.publicKey || !digConfigData) return;
     setBusy(true);
     setError(null);
-    setResult(null);
     try {
       const [config] = configPda();
       const [digConfig] = digConfigPda();
@@ -221,90 +278,83 @@ export function WykopGame() {
         })
         .rpc();
 
-      setSessionId(newSessionId);
       const duration = digConfigData.tierDurations[durationTier];
       const betAmount = BigInt(digConfigData.tierPrices[durationTier].toString());
       const floor = await fetchFloorEstimate(program, connection, betAmount);
-      setFloorEstimate(floor);
-      setSecondsLeft(duration);
-      setTotalDuration(duration);
-      setCrystalsShown(0);
-      setParticles([]);
-      setStatus("digging");
+      const fresh = buildSessionState(newSessionId, durationTier, duration, Date.now(), floor, true);
+      setSessions((prev) => {
+        // Collapse older rows so the new dig is the one in focus; leave
+        // "done" ones as the player left them.
+        const next: Record<string, DigSessionState> = {};
+        for (const [k, v] of Object.entries(prev)) next[k] = v.expanded && v.status !== "done" ? { ...v, expanded: false } : v;
+        next[newSessionId.toString()] = fresh;
+        return next;
+      });
       await refreshDigConfig();
     } catch (err: any) {
       setError(`Could not start dig: ${err.message ?? err}`);
     } finally {
       setBusy(false);
     }
-  }, [program, wallet.publicKey, digConfigData, durationTier, refreshDigConfig]);
+  }, [program, wallet.publicKey, digConfigData, durationTier, refreshDigConfig, connection]);
 
-  // Cosmetic 1s countdown, decoupled from the strike cadence below — purely
-  // client-side, no on-chain state per tick. Ends the dig at zero.
+  // Single global tick drives every tracked session at once, purely from
+  // absolute timestamps (startTs / nextStrikeAt / revealUntil) rather than
+  // per-session effects that start/stop on status changes — that pattern
+  // is what caused an earlier bug where changing status mid-flight
+  // cancelled the very effect driving that change. Time-based ticking
+  // sidesteps that whole class of bug and scales to N concurrent digs for
+  // free.
   useEffect(() => {
-    if (status !== "digging" || totalDuration <= 0) return;
-    timerRef.current = setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) {
-          if (timerRef.current) clearInterval(timerRef.current);
-          setStatus("resolving");
-          return 0;
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setSessions((prev) => {
+        let changed = false;
+        const next: Record<string, DigSessionState> = {};
+        for (const [key, s] of Object.entries(prev)) {
+          if (s.status === "digging") {
+            let updated = s;
+            while (updated.strikeIndex < updated.strikeIncrements.length && now >= updated.nextStrikeAt) {
+              const amount = updated.strikeIncrements[updated.strikeIndex];
+              const burstSize = 5 + Math.floor(Math.random() * 3);
+              const burst: Particle[] = Array.from({ length: burstSize }, () => ({
+                id: particleIdCounter++,
+                left: 20 + Math.random() * 60,
+                emoji: Math.random() < 0.55 ? "💎" : "✨",
+                big: Math.random() < 0.35,
+              }));
+              updated = {
+                ...updated,
+                crystalsShown: Math.min(updated.floorEstimate, updated.crystalsShown + amount),
+                strikeIndex: updated.strikeIndex + 1,
+                strikeKey: updated.strikeKey + 1,
+                nextStrikeAt: updated.nextStrikeAt + STRIKE_MS,
+                popups: [...updated.popups.slice(-2), { id: popupIdCounter++, amount }],
+                particles: [...updated.particles.slice(-16), ...burst],
+              };
+              changed = true;
+            }
+            const elapsedSec = Math.floor((now - updated.startTs) / 1000);
+            if (updated.totalDuration > 0 && elapsedSec >= updated.totalDuration) {
+              updated = { ...updated, status: "resolving", crystalsShown: updated.floorEstimate };
+              changed = true;
+            }
+            next[key] = updated;
+          } else if (s.status === "revealing" && now >= s.revealUntil) {
+            next[key] = { ...s, status: "done" };
+            changed = true;
+          } else {
+            next[key] = s;
+          }
         }
-        return s - 1;
+        return changed ? next : prev;
       });
-    }, 1000);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [status, totalDuration]);
+    }, TICK_MS);
+    return () => clearInterval(interval);
+  }, []);
 
-  // Pickaxe strikes every STRIKE_MS — one strike = one uneven chunk of the
-  // estimated floor landing at once (per the "1 kopnięcie = 1 naliczenie,
-  // zawsze nierównomiernej" request), instead of a smooth linear drip. The
-  // single real settlement still only happens once, when the countdown
-  // above hits zero (see the resolving effect below) — this is purely a
-  // cosmetic "does it feel like mining" pass.
-  useEffect(() => {
-    if (status !== "digging" || !digConfigData || totalDuration <= 0) return;
-    const remainingTicks = Math.max(1, Math.round((secondsLeft * 1000) / STRIKE_MS));
-    const remainingTotal = Math.max(0, floorEstimate - crystalsShown);
-    const increments = unevenSplit(remainingTotal, remainingTicks);
-    let tickIndex = 0;
-
-    strikeTimerRef.current = setInterval(() => {
-      const amount = increments[tickIndex] ?? 0;
-      tickIndex++;
-
-      setCrystalsShown((prev) => Math.min(floorEstimate, prev + amount));
-      setStrikeKey((k) => k + 1);
-      setPopups((prev) => [...prev.slice(-3), { id: popupIdRef.current++, amount }]);
-
-      const burstSize = 5 + Math.floor(Math.random() * 3);
-      const burst: Particle[] = Array.from({ length: burstSize }, () => ({
-        id: particleIdRef.current++,
-        left: 20 + Math.random() * 60,
-        emoji: Math.random() < 0.55 ? "💎" : "✨",
-        big: Math.random() < 0.35,
-      }));
-      setParticles((prev) => [...prev.slice(-16), ...burst]);
-
-      if (tickIndex >= increments.length) {
-        if (strikeTimerRef.current) clearInterval(strikeTimerRef.current);
-      }
-    }, STRIKE_MS);
-
-    return () => {
-      if (strikeTimerRef.current) clearInterval(strikeTimerRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, totalDuration]);
-
-  // Fire the real settlement once cosmetic countdown finishes.
-  useEffect(() => {
-    if (status !== "resolving" || sessionId === null || !program) return;
-    let cancelled = false;
-
-    (async () => {
+  const resolveSession = useCallback(
+    async (sessionId: bigint) => {
       try {
         const res = await fetch(`/api/dig-reveal`, {
           method: "POST",
@@ -316,57 +366,91 @@ export function WykopGame() {
           throw new Error(body.error ?? `resolver returned ${res.status}`);
         }
 
-        // Poll the session account until the resolver's tx lands.
+        const balanceBefore = await refreshMineBalance(digConfigData?.mineMint);
         const [session] = digSessionPda(sessionId);
         for (let i = 0; i < 15; i++) {
           await new Promise((r) => setTimeout(r, 1200));
-          const sessionAccount: any = await (program.account as any).digSession.fetch(session);
+          const sessionAccount: any = await (program as any).account.digSession.fetch(session);
           if (sessionAccount.status === 1) {
-            if (cancelled) return;
-            const balanceBefore = mineBalance ?? 0;
             const balanceAfter = await refreshMineBalance(digConfigData?.mineMint);
-            setResult({
+            const result: DigResult = {
               rarityHit: sessionAccount.rarityHit,
               mineEarned: Math.max(0, balanceAfter - balanceBefore),
+            };
+            setSessions((prev) => {
+              const cur = prev[sessionId.toString()];
+              if (!cur) return prev;
+              return {
+                ...prev,
+                [sessionId.toString()]: {
+                  ...cur,
+                  status: "revealing",
+                  result,
+                  revealUntil: Date.now() + REVEAL_MS,
+                },
+              };
             });
-            // Play the reveal (flash/gem/+amount) as one last big strike in
-            // the mine scene itself, instead of jumping straight to a flat
-            // end screen — this is the actual win moment, so it needs to
-            // happen where the player is looking, not after it. The actual
-            // "revealing" -> "done" delay is handled by a separate effect
-            // below, NOT here — setting status here would otherwise retrigger
-            // this effect's own cleanup (status is a dependency), flipping
-            // `cancelled` to true and permanently stranding the UI in
-            // "revealing" before it ever reaches "done".
-            setStatus("revealing");
             return;
           }
         }
         throw new Error("resolver didn't settle in time");
       } catch (err: any) {
-        if (!cancelled) setError(`Dig settlement failed: ${err.message ?? err}`);
+        setSessions((prev) => {
+          const cur = prev[sessionId.toString()];
+          if (!cur) return prev;
+          return { ...prev, [sessionId.toString()]: { ...cur, status: "error", error: err.message ?? String(err) } };
+        });
       }
-    })();
+    },
+    [program, digConfigData, refreshMineBalance],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, sessionId]);
-
-  // Holds the win reveal on screen for a beat before settling into the
-  // plain "done" summary. Deliberately its own effect, independent of the
-  // resolving-poll effect above, so it can't be cancelled by that effect's
-  // own cleanup when status changes.
+  // Kicks off the real settlement exactly once per session, as soon as it
+  // enters "resolving" — dedup'd via resolvingRef since this effect
+  // re-runs on every tick (sessions changes every TICK_MS).
   useEffect(() => {
-    if (status !== "revealing") return;
-    const t = setTimeout(() => setStatus("done"), 2300);
-    return () => clearTimeout(t);
-  }, [status]);
+    if (!program) return;
+    for (const s of Object.values(sessions)) {
+      const key = s.sessionId.toString();
+      if (s.status === "resolving" && !resolvingRef.current.has(key)) {
+        resolvingRef.current.add(key);
+        resolveSession(s.sessionId);
+      }
+    }
+  }, [sessions, program, resolveSession]);
+
+  const toggleExpanded = useCallback((key: string) => {
+    setSessions((prev) => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, expanded: !cur.expanded } };
+    });
+  }, []);
+
+  const dismissSession = useCallback((key: string) => {
+    setSessions((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    resolvingRef.current.delete(key);
+  }, []);
+
+  const retrySession = useCallback((key: string) => {
+    resolvingRef.current.delete(key);
+    setSessions((prev) => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, status: "resolving", error: null } };
+    });
+  }, []);
 
   const rarityTiers: RarityInfo[] = digConfigData
     ? digConfigData.rarityTiers.slice(0, digConfigData.activeRarityCount)
     : [];
+
+  const sessionList = Object.entries(sessions).sort((a, b) => (a[1].sessionId < b[1].sessionId ? 1 : -1));
+  const activeCount = sessionList.filter(([, s]) => s.status !== "done").length;
 
   return (
     <div className="mines-app">
@@ -383,11 +467,10 @@ export function WykopGame() {
       <p className="rules">
         Rent a mine for a fixed time. Common crystals drip in guaranteed the whole time — cash them out as $MINE when
         the timer ends. Longer digs also get a genuinely better shot at Rare/Epic bonus finds, not just more time.
+        You can run several digs at once — start another any time.
       </p>
 
-      {resuming && status === "idle" && <p className="status-banner">Checking for an in-progress dig...</p>}
-
-      {!resuming && status === "idle" && digConfigData && (
+      {digConfigData && (
         <div className="panel">
           <div className="tier-picker">
             {DIG_TIER_LABELS.map((label, i) => (
@@ -416,49 +499,114 @@ export function WykopGame() {
           </div>
 
           <button className="start-dig-btn" onClick={startDig} disabled={busy || !program}>
-            Start Dig
+            {activeCount > 0 ? `Start another dig (${activeCount} active)` : "Start Dig"}
           </button>
         </div>
       )}
 
-      {(status === "digging" || status === "resolving" || status === "revealing") && digConfigData && (
+      {resuming && <p className="status-banner">Checking for in-progress digs...</p>}
+
+      {sessionList.length > 0 && (
+        <div className="dig-list">
+          {sessionList.map(([key, s]) => (
+            <DigSessionRow
+              key={key}
+              session={s}
+              label={DIG_TIER_LABELS[s.durationTier] ?? `Tier ${s.durationTier}`}
+              onToggle={() => toggleExpanded(key)}
+              onDismiss={() => dismissSession(key)}
+              onRetry={() => retrySession(key)}
+            />
+          ))}
+        </div>
+      )}
+
+      {error && <p className="error-banner">{error}</p>}
+      {!digConfigData && <p className="status-banner">Loading dig configuration...</p>}
+    </div>
+  );
+}
+
+function DigSessionRow({
+  session: s,
+  label,
+  onToggle,
+  onDismiss,
+  onRetry,
+}: {
+  session: DigSessionState;
+  label: string;
+  onToggle: () => void;
+  onDismiss: () => void;
+  onRetry: () => void;
+}) {
+  const secondsLeft = Math.max(0, s.totalDuration - Math.floor((Date.now() - s.startTs) / 1000));
+  const progressPct = s.totalDuration > 0 ? Math.min(100, ((s.totalDuration - secondsLeft) / s.totalDuration) * 100) : 0;
+
+  const statusLabel =
+    s.status === "digging"
+      ? `${secondsLeft}s left`
+      : s.status === "resolving"
+        ? "Settling..."
+        : s.status === "revealing"
+          ? "Revealing!"
+          : s.status === "error"
+            ? "Failed"
+            : s.result
+              ? `+${s.result.mineEarned.toFixed(2)} $MINE`
+              : "Done";
+
+  return (
+    <div className={`dig-row-wrap${s.expanded ? " expanded" : ""}`}>
+      <button className={`dig-row status-${s.status}`} onClick={onToggle}>
+        <span className="dig-row-tier">{label}</span>
+        <span className="dig-row-status">{statusLabel}</span>
+        <div className="dig-row-bar">
+          <div className="dig-row-bar-fill" style={{ width: `${s.status === "digging" ? progressPct : 100}%` }} />
+        </div>
+        <span className="dig-row-caret">{s.expanded ? "▾" : "▸"}</span>
+      </button>
+
+      {s.expanded && (
         <div className="panel dig-active">
           <div className="dig-timer">
-            {status === "digging" ? `${secondsLeft}s` : status === "resolving" ? "Final strike..." : ""}
+            {s.status === "digging"
+              ? `${secondsLeft}s`
+              : s.status === "resolving"
+                ? "Final strike..."
+                : s.status === "error"
+                  ? "Something went wrong"
+                  : ""}
           </div>
 
-          <div className={`mine-scene${status === "resolving" ? " charging" : ""}`}>
+          <div className={`mine-scene${s.status === "resolving" ? " charging" : ""}`}>
             <div className="crystal-stream">
-              {particles.map((p) => (
-                <span
-                  key={p.id}
-                  className={`crystal-particle${p.big ? " big" : ""}`}
-                  style={{ left: `${p.left}%` }}
-                >
+              {s.particles.map((p) => (
+                <span key={p.id} className={`crystal-particle${p.big ? " big" : ""}`} style={{ left: `${p.left}%` }}>
                   {p.emoji}
                 </span>
               ))}
             </div>
 
-            {/* Rock + pickaxe stay mounted straight through the reveal —
-                the win bursts out of the same scene the player has been
-                watching the whole time, instead of the scene vanishing and
-                being replaced by a disconnected static result card. */}
-            <span className={`mine-rock hit${status === "revealing" ? " struck" : ""}`} key={strikeKey}>
-              🪨
-            </span>
-            <span className={`pickaxe${status === "revealing" ? " struck" : ""}`}>⛏️</span>
-            {status !== "revealing" &&
-              popups.map((p) => (
-                <span key={p.id} className="strike-popup" style={{ left: `${30 + Math.random() * 40}%` }}>
-                  +{p.amount.toFixed(1)}
+            {s.status !== "error" && (
+              <>
+                <span className={`mine-rock hit${s.status === "revealing" ? " struck" : ""}`} key={s.strikeKey}>
+                  🪨
                 </span>
-              ))}
+                <span className={`pickaxe${s.status === "revealing" ? " struck" : ""}`}>⛏️</span>
+                {s.status !== "revealing" &&
+                  s.popups.map((p) => (
+                    <span key={p.id} className="strike-popup" style={{ left: `${30 + Math.random() * 40}%` }}>
+                      +{p.amount.toFixed(1)}
+                    </span>
+                  ))}
+              </>
+            )}
 
-            {status === "revealing" && result && (
+            {s.status === "revealing" && s.result && (
               <div className="reveal-overlay">
-                <div className={`reveal-flash${result.rarityHit === 0xff ? " common" : ""}`} />
-                {result.rarityHit !== 0xff && (
+                <div className={`reveal-flash${s.result.rarityHit === 0xff ? " common" : ""}`} />
+                {s.result.rarityHit !== 0xff && (
                   <div className="confetti">
                     {Array.from({ length: 30 }, (_, i) => (
                       <span
@@ -466,7 +614,7 @@ export function WykopGame() {
                         style={{
                           left: `${Math.random() * 100}%`,
                           animationDelay: `${Math.random() * 0.3}s`,
-                          background: RARITY_COLORS[result.rarityHit % RARITY_COLORS.length],
+                          background: RARITY_COLORS[s.result!.rarityHit % RARITY_COLORS.length],
                         }}
                       />
                     ))}
@@ -475,67 +623,57 @@ export function WykopGame() {
                 <div
                   className="reveal-gem"
                   style={
-                    result.rarityHit !== 0xff
-                      ? { filter: `drop-shadow(0 0 24px ${RARITY_COLORS[result.rarityHit % RARITY_COLORS.length]})` }
+                    s.result.rarityHit !== 0xff
+                      ? { filter: `drop-shadow(0 0 24px ${RARITY_COLORS[s.result.rarityHit % RARITY_COLORS.length]})` }
                       : undefined
                   }
                 >
                   💎
                 </div>
-                {result.rarityHit !== 0xff && (
-                  <div
-                    className="reveal-rarity"
-                    style={{ color: RARITY_COLORS[result.rarityHit % RARITY_COLORS.length] }}
-                  >
-                    {RARITY_NAMES[result.rarityHit] ?? "Bonus"} find!
+                {s.result.rarityHit !== 0xff && (
+                  <div className="reveal-rarity" style={{ color: RARITY_COLORS[s.result.rarityHit % RARITY_COLORS.length] }}>
+                    {RARITY_NAMES[s.result.rarityHit] ?? "Bonus"} find!
                   </div>
                 )}
-                <div className="reveal-text">+{result.mineEarned.toFixed(2)} $MINE</div>
+                <div className="reveal-text">+{s.result.mineEarned.toFixed(2)} $MINE</div>
               </div>
             )}
           </div>
 
-          {status !== "revealing" && (
-            <div className="crystal-counter" key={Math.floor(crystalsShown * 10)}>
+          {s.status !== "revealing" && s.status !== "error" && (
+            <div className="crystal-counter" key={Math.floor(s.crystalsShown * 10)}>
               <span className="crystal-icon">💎</span>
-              {crystalsShown.toFixed(1)} $MINE
+              {s.crystalsShown.toFixed(1)} $MINE
             </div>
           )}
-          {status === "digging" && (
+          {s.status === "digging" && (
             <div className="dig-progress-track">
-              <div
-                className="dig-progress-fill"
-                style={{
-                  width: `${totalDuration > 0 ? ((totalDuration - secondsLeft) / totalDuration) * 100 : 0}%`,
-                }}
-              />
+              <div className="dig-progress-fill" style={{ width: `${progressPct}%` }} />
+            </div>
+          )}
+
+          {s.status === "error" && (
+            <>
+              <p className="error-banner">{s.error}</p>
+              <button className="start-dig-btn" onClick={onRetry}>
+                Retry settlement
+              </button>
+            </>
+          )}
+
+          {s.status === "done" && s.result && (
+            <div className={`result-banner ${s.result.rarityHit === 0xff ? "win" : "win jackpot"}`}>
+              <div className="result-headline">
+                {s.result.rarityHit === 0xff ? "Dig complete" : `${RARITY_NAMES[s.result.rarityHit] ?? "Bonus"} find!`}
+              </div>
+              <div className="result-amount">+{s.result.mineEarned.toFixed(2)} $MINE</div>
+              <button className="start-dig-btn" style={{ marginTop: 16 }} onClick={onDismiss}>
+                Dismiss
+              </button>
             </div>
           )}
         </div>
       )}
-
-      {status === "done" && result && (
-        <div className={`result-banner ${result.rarityHit === 0xff ? "win" : "win jackpot"}`}>
-          <div className="result-headline">
-            {result.rarityHit === 0xff ? "Dig complete" : `${RARITY_NAMES[result.rarityHit] ?? "Bonus"} find!`}
-          </div>
-          <div className="result-amount">+{result.mineEarned.toFixed(2)} $MINE</div>
-          <button
-            className="start-dig-btn"
-            style={{ marginTop: 16 }}
-            onClick={() => {
-              setStatus("idle");
-              setResult(null);
-              setSessionId(null);
-            }}
-          >
-            Dig again
-          </button>
-        </div>
-      )}
-
-      {error && <p className="error-banner">{error}</p>}
-      {!digConfigData && <p className="status-banner">Loading dig configuration...</p>}
     </div>
   );
 }
