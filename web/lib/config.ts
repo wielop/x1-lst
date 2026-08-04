@@ -41,26 +41,35 @@ export function digSessionPda(sessionId: bigint): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([DIG_SESSION_SEED, buf], PROGRAM_ID);
 }
 
+// v3: multi-position staking redesign (see the module comment above
+// `open_burn` in lib.rs) — StakingPool's layout changed (burn_tiers +
+// total_positions replace the old flat burn_weight_multiplier_bps) and
+// the old single-slot-per-owner StakePosition was replaced entirely by
+// Position (owner + a global counter, any number per wallet). All four
+// seeds bumped together for a clean reset — old v2 testnet state is
+// simply abandoned, nothing there was ever meant to be permanent.
 export function stakingPoolPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("staking_pool_v2")], PROGRAM_ID);
+  return PublicKey.findProgramAddressSync([Buffer.from("staking_pool_v3")], PROGRAM_ID);
 }
 
 export function stakingAuthorityPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("staking_authority_v2")], PROGRAM_ID);
+  return PublicKey.findProgramAddressSync([Buffer.from("staking_authority_v3")], PROGRAM_ID);
 }
 
 export function rewardVaultPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("reward_vault_v2")], PROGRAM_ID);
+  return PublicKey.findProgramAddressSync([Buffer.from("reward_vault_v3")], PROGRAM_ID);
 }
 
 export function stakeTokenVaultPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("stake_token_vault_v2")], PROGRAM_ID);
+  return PublicKey.findProgramAddressSync([Buffer.from("stake_token_vault_v3")], PROGRAM_ID);
 }
 
-export function stakePositionPda(owner: PublicKey): [PublicKey, number] {
-  // v3, not v2 — bumped when StakePosition gained `unclaimed_lamports`
-  // (see the comment on that field / claim_yield in lib.rs).
-  return PublicKey.findProgramAddressSync([Buffer.from("stake_position_v3"), owner.toBuffer()], PROGRAM_ID);
+/** A single lock or burn position — owner + a global position_id counter,
+ * so a wallet can hold any number of these concurrently. */
+export function positionPda(owner: PublicKey, positionId: bigint): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(positionId);
+  return PublicKey.findProgramAddressSync([Buffer.from("position_v1"), owner.toBuffer(), buf], PROGRAM_ID);
 }
 
 export function liquidityPoolPda(): [PublicKey, number] {

@@ -5,6 +5,7 @@ import { PROGRAM_ID, RPC_URL, RESOLVER_KEYPAIR_PATH, SEED_STORE_PATH, configPda 
 import { loadStore } from "./seedStore.js";
 import { minesIdl } from "./idl.js";
 import { startHttpServer } from "./http.js";
+import { startKeeper } from "./keeper.js";
 
 function loadKeypair(path: string): Keypair {
   const raw = JSON.parse(fs.readFileSync(path, "utf-8"));
@@ -44,6 +45,7 @@ async function ensureSeedCommitted() {
 async function main() {
   await ensureSeedCommitted();
   startHttpServer();
+  startKeeper();
 }
 
 main().catch((err) => {

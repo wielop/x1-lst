@@ -77,23 +77,37 @@ pub const RARITY_NONE: u8 = 0xFF;
 pub const ACC_REWARD_SCALE: u128 = 1_000_000_000_000;
 
 // --- $MINE staking (Phase B) ---
-// v2: variable lock-duration tiers (longer lock = more weight = more yield
-// share) + a separate permanent lock-and-burn option (destroys $MINE for an
-// even bigger, permanent weight boost) + automatic per-wager skim instead
-// of manual fund_staking_rewards. New seeds rather than reusing v1's,
-// since the account layouts changed — v1's PDAs (trivial testnet amounts)
-// are simply left behind.
-pub const STAKING_POOL_SEED: &[u8] = b"staking_pool_v2";
-// v3: StakePosition gained `unclaimed_lamports` (banked pending reward —
-// see the comment on `claim_yield`/`bank_pending`), a real layout change,
-// so this bumps again. The single v2 test position (3 $MINE, trivial
-// testnet amount) is abandoned.
-pub const STAKE_POSITION_SEED: &[u8] = b"stake_position_v3";
-pub const STAKE_TOKEN_VAULT_SEED: &[u8] = b"stake_token_vault_v2";
-pub const STAKING_AUTHORITY_SEED: &[u8] = b"staking_authority_v2";
-pub const REWARD_VAULT_SEED: &[u8] = b"reward_vault_v2";
+// v3: replaces the single shared-slot-per-owner StakePosition with a
+// multi-position model (Position, seeded by owner + a global counter) so
+// a player can hold any number of concurrent locks AND timed burns, each
+// tracked and accrued independently — no more "unstake before you can
+// lock again". Burn also stopped being permanent: it's now a time-limited
+// weight boost like a lock, but with an INVERSE duration/multiplier curve
+// (short duration = high multiplier, long = low) instead of a flat
+// forever-multiplier. Two real problems this fixes:
+//   1. A permanent weight boost meant early burners captured an
+//      ever-growing share of every future reward-pool skim forever,
+//      crowding out later stakers more and more as the pool matured.
+//   2. Without the inversion, burn would always beat lock at max
+//      duration + max multiplier with zero trade-off, since burn's token
+//      cost is already paid up front regardless of chosen duration —
+//      unlike a lock, where duration has a real, symmetric cost
+//      (illiquidity) that offsets the bigger multiplier.
+// Expiry (weight leaving the pool once unlock_at passes) is reaped via
+// `expire_position`, callable by ANYONE — not just the position's owner —
+// so a keeper/cron process can sweep expired positions even if the owner
+// never comes back to do it themselves. Fresh seeds throughout since the
+// whole account layout changed; testnet state under the old seeds is
+// simply abandoned (no migration — nothing there was ever meant to be
+// permanent).
+pub const STAKING_POOL_SEED: &[u8] = b"staking_pool_v3";
+pub const POSITION_SEED: &[u8] = b"position_v1";
+pub const STAKE_TOKEN_VAULT_SEED: &[u8] = b"stake_token_vault_v3";
+pub const STAKING_AUTHORITY_SEED: &[u8] = b"staking_authority_v3";
+pub const REWARD_VAULT_SEED: &[u8] = b"reward_vault_v3";
 
 pub const MAX_LOCK_TIERS: usize = 6;
+pub const MAX_BURN_TIERS: usize = 6;
 
 // --- $MINE/XNT liquidity pool (Phase C) ---
 pub const LIQUIDITY_POOL_SEED: &[u8] = b"liquidity_pool";
@@ -725,36 +739,43 @@ pub mod mines {
     }
 
     // -----------------------------------------------------------------
-    // $MINE staking v2 — real XNT yield, funded automatically from a
+    // $MINE staking v3 — real XNT yield, funded automatically from a
     // small skim taken off every Mines/Wykop wager (see `route_wager_skim`,
     // called from `start_round`/`start_dig`), not from token emission.
     // Rewards are a pro-rata share of whatever XNT actually arrived
-    // (Synthetix/MasterChef accumulator pattern, now denominated per unit
-    // of *weight* rather than per raw token — see below) — deliberately
-    // *not* a fixed or promised rate. A fixed floor-token payout combined
-    // with a fixed yield rate would be a risk-free arbitrage (buy the
-    // floor, stake it, yield more than you paid); making the return
-    // genuinely unknowable in advance and dependent on total participation
-    // closes that off without needing a $MINE/XNT price oracle at all.
+    // (Synthetix/MasterChef accumulator pattern, denominated per unit of
+    // *weight*) — deliberately *not* a fixed or promised rate, closing off
+    // the "buy the floor, stake it, yield more than you paid" arbitrage
+    // without needing a $MINE/XNT price oracle at all.
     //
-    // Two ways to earn weight:
-    //   - `stake`: lock $MINE for a chosen duration tier (admin-defined
-    //     menu, e.g. 0/30/90/180 days) — longer lock = higher weight
-    //     multiplier on the SAME tokens, redeemable after the lock elapses.
-    //   - `burn_and_boost`: permanently destroy $MINE for an even bigger,
-    //     *permanent* weight boost that can never be withdrawn (there's
-    //     nothing left to withdraw — the tokens are gone). This is real
-    //     supply reduction, not just reduced circulating supply like a
-    //     lock is.
+    // A wallet can open any number of concurrent positions, each tracked
+    // and accruing independently:
+    //   - `open_lock`: lock $MINE for a chosen duration tier — longer
+    //     lock = higher weight multiplier on the SAME tokens, redeemable
+    //     back to the owner via `expire_position` once the lock elapses.
+    //   - `open_burn`: permanently destroy $MINE for a weight boost that
+    //     is itself time-limited too, but on an INVERSE curve from lock
+    //     tiers — short duration = high multiplier, long = low. The
+    //     tokens never come back either way; only the *weight* expires.
+    //     Without the inversion there'd be no real trade-off (burn's cost
+    //     is already paid up front, so "longer AND bigger" would always
+    //     dominate); with it, picking a burn tier is a genuine choice
+    //     between a short strong burst and a longer gentler one.
+    // `expire_position` removes a position's weight from the pool once its
+    // `unlock_at` passes — callable by ANYONE, not just the owner, so a
+    // keeper/cron process can sweep expired weight even if the owner never
+    // comes back to do it. This also bounds how long any one position can
+    // dominate the reward pool, unlike the old permanent-burn design.
     // -----------------------------------------------------------------
 
     pub fn initialize_staking_pool(
         ctx: Context<InitializeStakingPool>,
         lock_tiers: Vec<LockTier>,
-        burn_weight_multiplier_bps: u32,
+        burn_tiers: Vec<BurnTier>,
         skim_bps: u16,
     ) -> Result<()> {
         require!(lock_tiers.len() <= MAX_LOCK_TIERS, MinesError::InvalidParam);
+        require!(burn_tiers.len() <= MAX_BURN_TIERS, MinesError::InvalidParam);
         require!(skim_bps < 10_000, MinesError::InvalidParam);
 
         let pool = &mut ctx.accounts.staking_pool;
@@ -764,61 +785,52 @@ pub mod mines {
         pool.total_weight = 0;
         pool.acc_reward_per_weight = 0;
         pool.unallocated_rewards = 0;
-        pool.burn_weight_multiplier_bps = burn_weight_multiplier_bps;
         pool.skim_bps = skim_bps;
+        pool.total_positions = 0;
         pool.bump = ctx.bumps["staking_pool"];
         pool.reward_vault_bump = ctx.bumps["reward_vault"];
         pool.staking_authority_bump = ctx.bumps["staking_authority"];
         ctx.accounts.reward_vault.bump = ctx.bumps["reward_vault"];
 
-        let mut tiers = [LockTier::default(); MAX_LOCK_TIERS];
+        let mut lock = [LockTier::default(); MAX_LOCK_TIERS];
         for (i, t) in lock_tiers.iter().enumerate() {
-            tiers[i] = *t;
+            lock[i] = *t;
         }
-        pool.lock_tiers = tiers;
+        pool.lock_tiers = lock;
         pool.active_lock_tier_count = lock_tiers.len() as u8;
 
-        emit!(StakingPoolInitialized { skim_bps, burn_weight_multiplier_bps, active_lock_tier_count: pool.active_lock_tier_count });
+        let mut burn = [BurnTier::default(); MAX_BURN_TIERS];
+        for (i, t) in burn_tiers.iter().enumerate() {
+            burn[i] = *t;
+        }
+        pool.burn_tiers = burn;
+        pool.active_burn_tier_count = burn_tiers.len() as u8;
+
+        emit!(StakingPoolInitialized {
+            skim_bps,
+            active_lock_tier_count: pool.active_lock_tier_count,
+            active_burn_tier_count: pool.active_burn_tier_count,
+        });
         Ok(())
     }
 
-    /// Admin-only tuning knob for the skim rate and burn multiplier —
-    /// lock tiers themselves aren't updatable in v1 (kept simple; positions
-    /// already snapshot their multiplier at stake time so changing the menu
-    /// later wouldn't retroactively affect them anyway).
-    pub fn update_staking_params(ctx: Context<UpdateStakingParams>, skim_bps: u16, burn_weight_multiplier_bps: u32) -> Result<()> {
+    /// Admin-only tuning knob for the skim rate — lock/burn tiers
+    /// themselves aren't updatable in v1 (kept simple; positions already
+    /// snapshot their multiplier at open time so changing the menu later
+    /// wouldn't retroactively affect them anyway).
+    pub fn update_staking_params(ctx: Context<UpdateStakingParams>, skim_bps: u16) -> Result<()> {
         require!(skim_bps < 10_000, MinesError::InvalidParam);
         let pool = &mut ctx.accounts.staking_pool;
         pool.skim_bps = skim_bps;
-        pool.burn_weight_multiplier_bps = burn_weight_multiplier_bps;
-        emit!(StakingParamsUpdated { skim_bps, burn_weight_multiplier_bps });
+        emit!(StakingParamsUpdated { skim_bps });
         Ok(())
     }
 
-    pub fn stake(ctx: Context<Stake>, amount: u64, lock_tier: u8) -> Result<()> {
+    pub fn open_lock(ctx: Context<OpenLock>, amount: u64, lock_tier: u8) -> Result<()> {
         require!(amount > 0, MinesError::InvalidParam);
         let pool = &mut ctx.accounts.staking_pool;
         require!((lock_tier as usize) < pool.active_lock_tier_count as usize, MinesError::InvalidParam);
-
         settle_unallocated(pool)?;
-
-        let position = &mut ctx.accounts.position;
-        // v1 simplification: one active lock per position at a time — must
-        // fully unstake before locking into a different tier. Avoids
-        // blending multiple multipliers within a single position.
-        require!(position.locked_amount == 0, MinesError::AlreadyLocked);
-
-        if position.owner == Pubkey::default() {
-            position.owner = ctx.accounts.staker.key();
-            position.bump = ctx.bumps["position"];
-        } else {
-            // Bank whatever accrued since last settlement — see the note
-            // on StakePosition.unclaimed_lamports for why this only ever
-            // updates account data, never touches lamports directly.
-            let existing_weight = position.locked_weight.checked_add(position.burned_weight).ok_or(MinesError::MathOverflow)?;
-            let pending = pending_reward(existing_weight, pool.acc_reward_per_weight, position.reward_debt)?;
-            position.unclaimed_lamports = position.unclaimed_lamports.checked_add(pending).ok_or(MinesError::MathOverflow)?;
-        }
 
         token::transfer(
             CpiContext::new(
@@ -839,96 +851,44 @@ pub mod mines {
             .checked_div(10_000)
             .ok_or(MinesError::MathOverflow)?;
 
+        let position_id = pool.total_positions;
+        pool.total_positions = pool.total_positions.checked_add(1).ok_or(MinesError::MathOverflow)?;
         pool.total_weight = pool.total_weight.checked_add(weight).ok_or(MinesError::MathOverflow)?;
-        position.locked_amount = amount;
-        position.locked_weight = weight;
+
+        let position = &mut ctx.accounts.position;
+        position.owner = ctx.accounts.staker.key();
+        position.position_id = position_id;
+        position.kind = PositionKind::Lock;
+        position.amount = amount;
+        position.weight = weight;
         position.unlock_at = Clock::get()?.unix_timestamp + tier.duration_seconds as i64;
-        position.reward_debt = weight_reward_debt(position.locked_weight, position.burned_weight, pool.acc_reward_per_weight)?;
-
-        emit!(Staked { owner: position.owner, amount, lock_tier, unlock_at: position.unlock_at, weight });
-        Ok(())
-    }
-
-    pub fn unstake(ctx: Context<Unstake>) -> Result<()> {
-        let pool = &mut ctx.accounts.staking_pool;
-        settle_unallocated(pool)?;
-
-        let position = &mut ctx.accounts.position;
-        require!(position.locked_amount > 0, MinesError::InvalidParam);
-        require!(Clock::get()?.unix_timestamp >= position.unlock_at, MinesError::StakeLocked);
-
-        let existing_weight = position.locked_weight.checked_add(position.burned_weight).ok_or(MinesError::MathOverflow)?;
-        let pending = pending_reward(existing_weight, pool.acc_reward_per_weight, position.reward_debt)?;
-        position.unclaimed_lamports = position.unclaimed_lamports.checked_add(pending).ok_or(MinesError::MathOverflow)?;
-
-        let amount = position.locked_amount;
-        let seeds: &[&[u8]] = &[STAKING_AUTHORITY_SEED, &[pool.staking_authority_bump]];
-        let signer = &[seeds];
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                token::Transfer {
-                    from: ctx.accounts.stake_token_vault.to_account_info(),
-                    to: ctx.accounts.staker_mine_ata.to_account_info(),
-                    authority: ctx.accounts.staking_authority.to_account_info(),
-                },
-                signer,
-            ),
-            amount,
-        )?;
-
-        pool.total_weight = pool.total_weight.checked_sub(position.locked_weight).ok_or(MinesError::MathOverflow)?;
-        position.locked_amount = 0;
-        position.locked_weight = 0;
-        position.reward_debt = weight_reward_debt(0, position.burned_weight, pool.acc_reward_per_weight)?;
-
-        emit!(Unstaked { owner: position.owner, amount });
-        Ok(())
-    }
-
-    /// The only staking instruction that ever moves lamports — bundles
-    /// whatever's been banked in `unclaimed_lamports` (from stake/unstake/
-    /// burn_and_boost, which never touch lamports directly) plus anything
-    /// newly accrued since, and pays it all out in one transfer. No SPL
-    /// token CPI happens in this instruction.
-    pub fn claim_yield(ctx: Context<ClaimYield>) -> Result<()> {
-        let pool = &mut ctx.accounts.staking_pool;
-        settle_unallocated(pool)?;
-
-        let position = &mut ctx.accounts.position;
-        let total_weight = position.locked_weight.checked_add(position.burned_weight).ok_or(MinesError::MathOverflow)?;
-        let newly_accrued = pending_reward(total_weight, pool.acc_reward_per_weight, position.reward_debt)?;
-        let total_pending = position.unclaimed_lamports.checked_add(newly_accrued).ok_or(MinesError::MathOverflow)?;
-        require!(total_pending > 0, MinesError::NothingToCashOut);
-
-        pay_from_reward_vault(&ctx.accounts.reward_vault.to_account_info(), &ctx.accounts.staker.to_account_info(), total_pending)?;
+        position.reward_debt = weight_reward_debt(weight, pool.acc_reward_per_weight)?;
         position.unclaimed_lamports = 0;
-        position.reward_debt = weight_reward_debt(position.locked_weight, position.burned_weight, pool.acc_reward_per_weight)?;
+        position.expired = false;
+        position.bump = ctx.bumps["position"];
 
-        emit!(YieldClaimed { owner: position.owner, amount: total_pending });
+        emit!(PositionOpened {
+            owner: position.owner,
+            position_id,
+            kind: PositionKind::Lock as u8,
+            amount,
+            tier: lock_tier,
+            weight,
+            unlock_at: position.unlock_at,
+        });
         Ok(())
     }
 
-    /// Permanently destroys `amount` $MINE in exchange for a *permanent*
-    /// weight boost — bigger than any timed lock tier, and unlike a lock,
-    /// never expires and never comes back. This is the "lock and burn"
-    /// option: real, irreversible supply reduction, not just reduced
-    /// circulating supply. Independent of any active timed lock — a
-    /// position can have both simultaneously.
-    pub fn burn_and_boost(ctx: Context<BurnAndBoost>, amount: u64) -> Result<()> {
+    /// Burns `amount` $MINE immediately (irreversible — the tokens never
+    /// come back, on any tier) in exchange for a weight boost that lasts
+    /// until `unlock_at`, at which point `expire_position` removes it from
+    /// the pool. See the module-level comment above for why the tier
+    /// curve is inverted from lock tiers (short = high multiplier).
+    pub fn open_burn(ctx: Context<OpenBurn>, amount: u64, burn_tier: u8) -> Result<()> {
         require!(amount > 0, MinesError::InvalidParam);
         let pool = &mut ctx.accounts.staking_pool;
+        require!((burn_tier as usize) < pool.active_burn_tier_count as usize, MinesError::InvalidParam);
         settle_unallocated(pool)?;
-
-        let position = &mut ctx.accounts.position;
-        if position.owner == Pubkey::default() {
-            position.owner = ctx.accounts.staker.key();
-            position.bump = ctx.bumps["position"];
-        } else {
-            let existing_weight = position.locked_weight.checked_add(position.burned_weight).ok_or(MinesError::MathOverflow)?;
-            let pending = pending_reward(existing_weight, pool.acc_reward_per_weight, position.reward_debt)?;
-            position.unclaimed_lamports = position.unclaimed_lamports.checked_add(pending).ok_or(MinesError::MathOverflow)?;
-        }
 
         token::burn(
             CpiContext::new(
@@ -942,17 +902,109 @@ pub mod mines {
             amount,
         )?;
 
-        let added_weight = (amount as u128)
-            .checked_mul(pool.burn_weight_multiplier_bps as u128)
+        let tier = pool.burn_tiers[burn_tier as usize];
+        let weight = (amount as u128)
+            .checked_mul(tier.weight_multiplier_bps as u128)
             .ok_or(MinesError::MathOverflow)?
             .checked_div(10_000)
             .ok_or(MinesError::MathOverflow)?;
 
-        pool.total_weight = pool.total_weight.checked_add(added_weight).ok_or(MinesError::MathOverflow)?;
-        position.burned_weight = position.burned_weight.checked_add(added_weight).ok_or(MinesError::MathOverflow)?;
-        position.reward_debt = weight_reward_debt(position.locked_weight, position.burned_weight, pool.acc_reward_per_weight)?;
+        let position_id = pool.total_positions;
+        pool.total_positions = pool.total_positions.checked_add(1).ok_or(MinesError::MathOverflow)?;
+        pool.total_weight = pool.total_weight.checked_add(weight).ok_or(MinesError::MathOverflow)?;
 
-        emit!(BurnedAndBoosted { owner: position.owner, amount_burned: amount, added_weight, total_burned_weight: position.burned_weight });
+        let position = &mut ctx.accounts.position;
+        position.owner = ctx.accounts.staker.key();
+        position.position_id = position_id;
+        position.kind = PositionKind::Burn;
+        position.amount = amount;
+        position.weight = weight;
+        position.unlock_at = Clock::get()?.unix_timestamp + tier.duration_seconds as i64;
+        position.reward_debt = weight_reward_debt(weight, pool.acc_reward_per_weight)?;
+        position.unclaimed_lamports = 0;
+        position.expired = false;
+        position.bump = ctx.bumps["position"];
+
+        emit!(PositionOpened {
+            owner: position.owner,
+            position_id,
+            kind: PositionKind::Burn as u8,
+            amount,
+            tier: burn_tier,
+            weight,
+            unlock_at: position.unlock_at,
+        });
+        Ok(())
+    }
+
+    /// Removes an expired position's weight from the pool and, for a Lock,
+    /// returns the principal $MINE to its owner — callable by ANYONE once
+    /// `unlock_at` has passed, not just the position's owner, so a
+    /// keeper/cron process can sweep expired positions automatically. This
+    /// is safe to be permissionless: a Burn position has no funds left to
+    /// move (already destroyed at open_burn time), and a Lock's principal
+    /// always flows to `position.owner`'s own ATA regardless of who calls
+    /// this — the caller pays the tx fee and gets nothing else.
+    pub fn expire_position(ctx: Context<ExpirePosition>) -> Result<()> {
+        let pool = &mut ctx.accounts.staking_pool;
+        settle_unallocated(pool)?;
+
+        let position = &mut ctx.accounts.position;
+        require!(!position.expired, MinesError::AlreadyExpired);
+        require!(Clock::get()?.unix_timestamp >= position.unlock_at, MinesError::StakeLocked);
+
+        let pending = pending_reward(position.weight, pool.acc_reward_per_weight, position.reward_debt)?;
+        position.unclaimed_lamports = position.unclaimed_lamports.checked_add(pending).ok_or(MinesError::MathOverflow)?;
+        pool.total_weight = pool.total_weight.checked_sub(position.weight).ok_or(MinesError::MathOverflow)?;
+
+        if position.kind == PositionKind::Lock {
+            let amount = position.amount;
+            let seeds: &[&[u8]] = &[STAKING_AUTHORITY_SEED, &[pool.staking_authority_bump]];
+            let signer = &[seeds];
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    token::Transfer {
+                        from: ctx.accounts.stake_token_vault.to_account_info(),
+                        to: ctx.accounts.owner_mine_ata.to_account_info(),
+                        authority: ctx.accounts.staking_authority.to_account_info(),
+                    },
+                    signer,
+                ),
+                amount,
+            )?;
+        }
+
+        position.expired = true;
+        position.weight = 0;
+        position.reward_debt = weight_reward_debt(0, pool.acc_reward_per_weight)?;
+
+        emit!(PositionExpired { owner: position.owner, position_id: position.position_id, kind: position.kind as u8 });
+        Ok(())
+    }
+
+    /// The only staking instruction that ever moves lamports — bundles
+    /// whatever's been banked in `unclaimed_lamports` (from open_lock/
+    /// open_burn/expire_position, which never touch lamports directly)
+    /// plus anything newly accrued since, and pays it all out in one
+    /// transfer. No SPL token CPI happens in this instruction. Works the
+    /// same whether the position is still active or already expired — an
+    /// expired position's weight is 0, so it simply stops accruing
+    /// anything new, but whatever was banked before expiry is still owed.
+    pub fn claim_yield(ctx: Context<ClaimYield>, _position_id: u64) -> Result<()> {
+        let pool = &mut ctx.accounts.staking_pool;
+        settle_unallocated(pool)?;
+
+        let position = &mut ctx.accounts.position;
+        let newly_accrued = pending_reward(position.weight, pool.acc_reward_per_weight, position.reward_debt)?;
+        let total_pending = position.unclaimed_lamports.checked_add(newly_accrued).ok_or(MinesError::MathOverflow)?;
+        require!(total_pending > 0, MinesError::NothingToCashOut);
+
+        pay_from_reward_vault(&ctx.accounts.reward_vault.to_account_info(), &ctx.accounts.staker.to_account_info(), total_pending)?;
+        position.unclaimed_lamports = 0;
+        position.reward_debt = weight_reward_debt(position.weight, pool.acc_reward_per_weight)?;
+
+        emit!(YieldClaimed { owner: position.owner, amount: total_pending });
         Ok(())
     }
 
@@ -1479,7 +1531,8 @@ pub struct InitializeStakingPool<'info> {
 }
 
 #[derive(Accounts)]
-pub struct Stake<'info> {
+#[instruction(amount: u64, lock_tier: u8)]
+pub struct OpenLock<'info> {
     #[account(mut)]
     pub staker: Signer<'info>,
 
@@ -1487,16 +1540,13 @@ pub struct Stake<'info> {
     pub staking_pool: Box<Account<'info, StakingPool>>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = staker,
-        space = StakePosition::LEN,
-        seeds = [STAKE_POSITION_SEED, staker.key().as_ref()],
+        space = Position::LEN,
+        seeds = [POSITION_SEED, staker.key().as_ref(), &staking_pool.total_positions.to_le_bytes()],
         bump
     )]
-    pub position: Box<Account<'info, StakePosition>>,
-
-    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
-    pub reward_vault: Box<Account<'info, RewardVault>>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(mut, address = staking_pool.stake_token_vault)]
     pub stake_token_vault: Box<Account<'info, TokenAccount>>,
@@ -1509,18 +1559,49 @@ pub struct Stake<'info> {
 }
 
 #[derive(Accounts)]
-pub struct Unstake<'info> {
+#[instruction(amount: u64, burn_tier: u8)]
+pub struct OpenBurn<'info> {
     #[account(mut)]
     pub staker: Signer<'info>,
 
     #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
     pub staking_pool: Box<Account<'info, StakingPool>>,
 
-    #[account(mut, seeds = [STAKE_POSITION_SEED, staker.key().as_ref()], bump = position.bump)]
-    pub position: Box<Account<'info, StakePosition>>,
+    #[account(
+        init,
+        payer = staker,
+        space = Position::LEN,
+        seeds = [POSITION_SEED, staker.key().as_ref(), &staking_pool.total_positions.to_le_bytes()],
+        bump
+    )]
+    pub position: Box<Account<'info, Position>>,
 
-    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
-    pub reward_vault: Box<Account<'info, RewardVault>>,
+    #[account(mut, address = staking_pool.mine_mint)]
+    pub mine_mint: Box<Account<'info, Mint>>,
+
+    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = staker)]
+    pub staker_mine_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ExpirePosition<'info> {
+    /// Anyone can pay for this — the position's owner, or a keeper/cron
+    /// process. See the comment on `expire_position` for why that's safe.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    #[account(
+        mut,
+        seeds = [POSITION_SEED, position.owner.as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump
+    )]
+    pub position: Box<Account<'info, Position>>,
 
     #[account(mut, address = staking_pool.stake_token_vault)]
     pub stake_token_vault: Box<Account<'info, TokenAccount>>,
@@ -1529,13 +1610,19 @@ pub struct Unstake<'info> {
     #[account(seeds = [STAKING_AUTHORITY_SEED], bump = staking_pool.staking_authority_bump)]
     pub staking_authority: UncheckedAccount<'info>,
 
-    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = staker)]
-    pub staker_mine_ata: Box<Account<'info, TokenAccount>>,
+    /// The position owner's own $MINE ATA — a Lock's principal always
+    /// lands here regardless of who signs `payer`. Not touched at all for
+    /// a Burn position (already-destroyed tokens have nowhere to return
+    /// to), but still required so the Accounts struct is uniform for both
+    /// kinds.
+    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = position.owner)]
+    pub owner_mine_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
+#[instruction(position_id: u64)]
 pub struct ClaimYield<'info> {
     #[account(mut)]
     pub staker: Signer<'info>,
@@ -1543,8 +1630,12 @@ pub struct ClaimYield<'info> {
     #[account(seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
     pub staking_pool: Box<Account<'info, StakingPool>>,
 
-    #[account(mut, seeds = [STAKE_POSITION_SEED, staker.key().as_ref()], bump = position.bump)]
-    pub position: Box<Account<'info, StakePosition>>,
+    #[account(
+        mut,
+        seeds = [POSITION_SEED, staker.key().as_ref(), &position_id.to_le_bytes()],
+        bump = position.bump
+    )]
+    pub position: Box<Account<'info, Position>>,
 
     #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
     pub reward_vault: Box<Account<'info, RewardVault>>,
@@ -1555,36 +1646,6 @@ pub struct UpdateStakingParams<'info> {
     pub admin: Signer<'info>,
     #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump, has_one = admin)]
     pub staking_pool: Box<Account<'info, StakingPool>>,
-}
-
-#[derive(Accounts)]
-pub struct BurnAndBoost<'info> {
-    #[account(mut)]
-    pub staker: Signer<'info>,
-
-    #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
-    pub staking_pool: Box<Account<'info, StakingPool>>,
-
-    #[account(
-        init_if_needed,
-        payer = staker,
-        space = StakePosition::LEN,
-        seeds = [STAKE_POSITION_SEED, staker.key().as_ref()],
-        bump
-    )]
-    pub position: Box<Account<'info, StakePosition>>,
-
-    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
-    pub reward_vault: Box<Account<'info, RewardVault>>,
-
-    #[account(mut, address = staking_pool.mine_mint)]
-    pub mine_mint: Box<Account<'info, Mint>>,
-
-    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = staker)]
-    pub staker_mine_ata: Box<Account<'info, TokenAccount>>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -1845,10 +1906,10 @@ pub struct StakingPool {
     pub admin: Pubkey,
     pub mine_mint: Pubkey,
     pub stake_token_vault: Pubkey,
-    /// Sum of every position's (locked_weight + burned_weight) — reward
-    /// distribution is proportional to WEIGHT, not raw staked token count,
-    /// which is what makes "lock longer = earn more" and "burn = earn even
-    /// more, permanently" both fall out of the same accumulator math.
+    /// Sum of every non-expired position's weight — reward distribution is
+    /// proportional to WEIGHT, not raw staked/burned token count, which is
+    /// what makes "lock longer = earn more" and "burn = earn even more (for
+    /// a while)" both fall out of the same accumulator math.
     pub total_weight: u128,
     pub acc_reward_per_weight: u128,
     /// House-edge skim that arrived while total_weight was still zero
@@ -1857,13 +1918,19 @@ pub struct StakingPool {
     pub unallocated_rewards: u64,
     pub lock_tiers: [LockTier; MAX_LOCK_TIERS],
     pub active_lock_tier_count: u8,
-    /// Multiplier applied to permanently-burned $MINE via `burn_and_boost`
-    /// (bps, 10_000 = 1x) — set higher than any timed lock tier since it's
-    /// a one-way, irreversible commitment.
-    pub burn_weight_multiplier_bps: u32,
+    /// Burn tiers — same shape as lock tiers, but the admin sets an
+    /// INVERSE duration/multiplier curve (short = high, long = low). See
+    /// the module comment above `open_burn` for why.
+    pub burn_tiers: [BurnTier; MAX_BURN_TIERS],
+    pub active_burn_tier_count: u8,
     /// % of every Mines/Wykop wager auto-routed here (see
     /// `route_wager_skim`), bps.
     pub skim_bps: u16,
+    /// Global counter used as the third PDA seed component for `Position`
+    /// accounts, letting any number of concurrent lock/burn positions
+    /// exist per owner instead of one shared slot (mirrors DigConfig's
+    /// `total_sessions` pattern).
+    pub total_positions: u64,
     pub bump: u8,
     pub reward_vault_bump: u8,
     pub staking_authority_bump: u8,
@@ -1875,10 +1942,12 @@ impl StakingPool {
         + 16
         + 16
         + 8
-        + (4 + 4 * DIG_TIER_COUNT) * MAX_LOCK_TIERS
+        + 8 * MAX_LOCK_TIERS
         + 1
-        + 4
+        + 8 * MAX_BURN_TIERS
+        + 1
         + 2
+        + 8
         + 1
         + 1
         + 1;
@@ -1893,34 +1962,59 @@ pub struct LockTier {
     pub weight_multiplier_bps: u32,
 }
 
+/// One time-limited burn option. Same shape as LockTier, but conceptually
+/// inverted: `duration_seconds` here is how long the weight boost lasts
+/// before `expire_position` removes it (the tokens are gone regardless,
+/// from the moment of `open_burn`), and the admin is expected to set
+/// SHORTER durations to HIGHER multipliers — see the module comment above
+/// `open_burn`.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
+pub struct BurnTier {
+    pub duration_seconds: u32,
+    pub weight_multiplier_bps: u32,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+pub enum PositionKind {
+    Lock,
+    Burn,
+}
+
+/// A single lock or burn commitment. A wallet may hold any number of
+/// these concurrently (each its own PDA, keyed by owner + a global
+/// counter) — opening another lock or burn never touches existing ones.
 #[account]
-pub struct StakePosition {
+pub struct Position {
     pub owner: Pubkey,
-    /// Raw $MINE currently locked, redeemable via `unstake` once
-    /// `unlock_at` passes. Zero if nothing is currently locked (a position
-    /// can still hold nonzero `burned_weight` with no active lock).
-    pub locked_amount: u64,
-    /// locked_amount * chosen tier's multiplier, snapshotted at stake time.
-    pub locked_weight: u128,
-    /// Permanent weight from `burn_and_boost` — never decreases, never
-    /// withdrawable (the underlying $MINE no longer exists).
-    pub burned_weight: u128,
+    pub position_id: u64,
+    pub kind: PositionKind,
+    /// $MINE locked (kind = Lock, returned to owner by `expire_position`)
+    /// or burned (kind = Burn, gone forever from the moment of
+    /// `open_burn`) — kept for Burn mainly as a historical record.
+    pub amount: u64,
+    /// amount * the chosen tier's multiplier, snapshotted at open time.
+    /// Zeroed by `expire_position` once removed from `pool.total_weight`.
+    pub weight: u128,
+    /// When this position's weight stops counting. For Lock, this is also
+    /// when the principal becomes withdrawable via `expire_position`. For
+    /// Burn, only the weight expires — the tokens were already destroyed
+    /// at `open_burn` time.
     pub unlock_at: i64,
     pub reward_debt: u128,
-    /// Pending reward "banked" here whenever weight changes (stake/unstake/
-    /// burn_and_boost), instead of paying it out immediately — those
-    /// instructions also do an SPL token CPI (transfer/burn), and this
-    /// program never mixes a raw lamport pointer mutation with a token CPI
-    /// in the same instruction (the two together tripped Solana's
-    /// lamport-conservation check under real testing — see the note on
-    /// `claim_yield`). Only `claim_yield` (no token CPI at all) ever
-    /// actually moves lamports out of the reward vault.
+    /// Pending reward "banked" here whenever weight changes (open_lock/
+    /// open_burn/expire_position never touch lamports directly — see the
+    /// note on `claim_yield` for why). Only `claim_yield` (no token CPI at
+    /// all) ever actually moves lamports out of the reward vault.
     pub unclaimed_lamports: u64,
+    /// True once `expire_position` has run — weight already removed from
+    /// `pool.total_weight` (and, for Lock, principal already returned).
+    /// `unclaimed_lamports` may still be nonzero and claimable after this.
+    pub expired: bool,
     pub bump: u8,
 }
 
-impl StakePosition {
-    pub const LEN: usize = 8 + 32 + 8 + 16 + 16 + 8 + 16 + 8 + 1;
+impl Position {
+    pub const LEN: usize = 8 + 32 + 8 + 1 + 8 + 16 + 8 + 16 + 8 + 1 + 1;
 }
 
 /// Program-owned lamport holder for the XNT staking reward pool — same
@@ -2088,43 +2182,38 @@ pub struct DigResolved {
 #[event]
 pub struct StakingPoolInitialized {
     pub skim_bps: u16,
-    pub burn_weight_multiplier_bps: u32,
     pub active_lock_tier_count: u8,
+    pub active_burn_tier_count: u8,
 }
 
 #[event]
 pub struct StakingParamsUpdated {
     pub skim_bps: u16,
-    pub burn_weight_multiplier_bps: u32,
 }
 
 #[event]
-pub struct Staked {
+pub struct PositionOpened {
     pub owner: Pubkey,
+    pub position_id: u64,
+    /// 0 = Lock, 1 = Burn (mirrors PositionKind's discriminant).
+    pub kind: u8,
     pub amount: u64,
-    pub lock_tier: u8,
-    pub unlock_at: i64,
+    pub tier: u8,
     pub weight: u128,
+    pub unlock_at: i64,
 }
 
 #[event]
-pub struct Unstaked {
+pub struct PositionExpired {
     pub owner: Pubkey,
-    pub amount: u64,
+    pub position_id: u64,
+    pub kind: u8,
 }
 
 #[event]
 pub struct YieldClaimed {
     pub owner: Pubkey,
     pub amount: u64,
-}
-
-#[event]
-pub struct BurnedAndBoosted {
-    pub owner: Pubkey,
-    pub amount_burned: u64,
-    pub added_weight: u128,
-    pub total_burned_weight: u128,
 }
 
 #[event]
@@ -2199,8 +2288,8 @@ pub enum MinesError {
     PoolEmpty,
     #[msg("swap output is below the requested minimum (slippage)")]
     SlippageExceeded,
-    #[msg("position already has an active lock, unstake it before locking into a different tier")]
-    AlreadyLocked,
+    #[msg("position has already been expired/reaped")]
+    AlreadyExpired,
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,20 +2322,18 @@ fn emission_rate_scaled(cumulative_volume: u64) -> u128 {
     VOLUME_THRESHOLDS[VOLUME_THRESHOLDS.len() - 1].1
 }
 
-/// Standard MasterChef/Synthetix accumulator-pattern pending-reward calc.
 /// Standard MasterChef/Synthetix accumulator-pattern pending-reward calc,
-/// now denominated per unit of *weight* (locked_weight + burned_weight)
-/// rather than per raw staked token — this is the whole mechanism behind
-/// "lock longer = earn more" and "burn = earn even more, permanently".
+/// denominated per unit of a position's *weight* rather than per raw
+/// staked token — this is the whole mechanism behind "lock longer = earn
+/// more" and "burn = earn even more, for a while".
 fn pending_reward(weight: u128, acc_reward_per_weight: u128, reward_debt: u128) -> Result<u64> {
     let accrued = weight.checked_mul(acc_reward_per_weight).ok_or(MinesError::MathOverflow)?
         .checked_div(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow)?;
     Ok(accrued.saturating_sub(reward_debt).try_into().unwrap_or(u64::MAX))
 }
 
-fn weight_reward_debt(locked_weight: u128, burned_weight: u128, acc_reward_per_weight: u128) -> Result<u128> {
-    let total = locked_weight.checked_add(burned_weight).ok_or(MinesError::MathOverflow)?;
-    total.checked_mul(acc_reward_per_weight).ok_or(MinesError::MathOverflow)?
+fn weight_reward_debt(weight: u128, acc_reward_per_weight: u128) -> Result<u128> {
+    weight.checked_mul(acc_reward_per_weight).ok_or(MinesError::MathOverflow)?
         .checked_div(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow.into())
 }
 

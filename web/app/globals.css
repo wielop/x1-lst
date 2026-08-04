@@ -693,6 +693,66 @@ header h1::before {
   box-shadow: 0 4px 20px rgba(248, 113, 113, 0.4) !important;
 }
 
+.position-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.position-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(139, 92, 246, 0.08);
+  font-size: 13px;
+}
+
+.position-row.expired {
+  opacity: 0.5;
+}
+
+.position-kind {
+  font-size: 15px;
+}
+
+.position-amount {
+  font-weight: 700;
+  color: #e8e4fb;
+  white-space: nowrap;
+}
+
+.position-weight {
+  color: #8f88ad;
+  white-space: nowrap;
+}
+
+.position-status {
+  color: #b7b0d6;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.position-pending {
+  color: var(--gold-bright);
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.position-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.position-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 /* --- Wykop crystal-drip animation --- */
 .crystal-stream {
   position: relative;
