@@ -356,6 +356,15 @@ export function WykopGame() {
   const resolveSession = useCallback(
     async (sessionId: bigint) => {
       try {
+        // Must be captured BEFORE the /api/dig-reveal call, not after — the
+        // resolver's handler awaits resolveDig's .rpc() (which itself
+        // waits for on-chain confirmation) before responding, so by the
+        // time that fetch resolves the mint has already landed. Reading
+        // "before" afterwards was capturing a balance that already
+        // included this session's own reward, making every delta compute
+        // to 0 regardless of the real (nonzero) mint amount.
+        const balanceBefore = await refreshMineBalance(digConfigData?.mineMint);
+
         const res = await fetch(`/api/dig-reveal`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -366,7 +375,6 @@ export function WykopGame() {
           throw new Error(body.error ?? `resolver returned ${res.status}`);
         }
 
-        const balanceBefore = await refreshMineBalance(digConfigData?.mineMint);
         const [session] = digSessionPda(sessionId);
         for (let i = 0; i < 15; i++) {
           await new Promise((r) => setTimeout(r, 1200));
