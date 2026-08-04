@@ -58,6 +58,31 @@ function formatDuration(seconds: number): string {
   return `${Math.ceil(seconds / 86400)}d`;
 }
 
+/** Small click-to-toggle "ⓘ" popover — keeps the default UI to one short
+ * line, with the full explanation available on demand instead of always
+ * on screen. */
+function InfoTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="info-tip">
+      <button
+        type="button"
+        className="info-tip-btn"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="More info"
+      >
+        ⓘ
+      </button>
+      {open && (
+        <>
+          <div className="info-tip-backdrop" onClick={() => setOpen(false)} />
+          <div className="info-tip-popover">{text}</div>
+        </>
+      )}
+    </span>
+  );
+}
+
 export function StakingPanel() {
   const { connection } = useConnection();
   const wallet = useWallet();
@@ -90,6 +115,7 @@ export function StakingPanel() {
   const [poolStats, setPoolStats] = useState<{ tvlMine: number; tvlXnt: number; totalStakers: number } | null>(
     null,
   );
+  const [showCompleted, setShowCompleted] = useState(false);
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -253,6 +279,18 @@ export function StakingPanel() {
     () => positions.filter((p) => p.kind === "burn" && !p.expired).reduce((sum, p) => sum + p.weight, 0n),
     [positions],
   );
+  // A position is "done" once it's expired/withdrawn AND has nothing left
+  // to claim — keeping those out of the default view is most of what was
+  // cluttering this list after a session of testing.
+  const [activePositions, completedPositions] = useMemo(() => {
+    const active: PositionRow[] = [];
+    const completed: PositionRow[] = [];
+    for (const p of positions) {
+      if (p.expired && pendingYieldOf(p, accRewardPerWeight) <= 0) completed.push(p);
+      else active.push(p);
+    }
+    return [active, completed];
+  }, [positions, accRewardPerWeight]);
 
   const lockTiers: { durationSeconds: number; weightMultiplierBps: number }[] = poolData
     ? poolData.lockTiers.slice(0, poolData.activeLockTierCount)
@@ -420,14 +458,9 @@ export function StakingPanel() {
         </div>
       </header>
 
-      <p className="rules">
-        Lock or burn $MINE to earn a pro-rata share of the real XNT reward pool below — auto-funded from a small
-        skim off every Mines/Wykop wager, not from new token emission. You can open as many locks and burns as you
-        want, at any time — each is tracked and pays out independently. Locking is reversible (get your $MINE back
-        once the lock ends); burning destroys the $MINE forever, but the resulting weight boost is bigger and, on
-        the shortest burn tier, expires faster too — a short strong burst instead of a long gentle one. Neither
-        pays out immediately: they only change your share going forward, so yield only shows up once new wagers
-        skim more XNT into the pool.
+      <p className="rules-short">
+        Lock or burn $MINE for a share of real XNT rewards.
+        <InfoTip text="Auto-funded from a small skim off every Mines/Wykop wager, not new token emission. You can open as many locks and burns as you want, at any time — each is tracked and pays out independently. Locking is reversible (get your $MINE back once it ends); burning destroys the $MINE forever for a bigger weight boost. Neither pays out immediately — yield only shows up once new wagers skim more XNT into the pool." />
       </p>
 
       {!poolData && <p className="status-banner">Loading staking pool...</p>}
@@ -486,17 +519,15 @@ export function StakingPanel() {
 
           {totalBurnWeight > 0n && (
             <p className="status-banner status-cashed_out">
-              🔥 {(Number(totalBurnWeight) / 1e6).toFixed(2)} weight currently active from burns — those tokens are
-              gone forever; this weight will expire on its own tier's schedule (see the list below).
+              🔥 {(Number(totalBurnWeight) / 1e6).toFixed(2)} weight active from burns
             </p>
           )}
 
           <div className="panel">
-            <p className="rules" style={{ marginTop: 0 }}>
-              <strong>Lock:</strong> your $MINE stays yours — you get it all back once the lock ends. While locked
-              it counts as weight (tier multiplier × amount) toward your share of the reward pool. You can open
-              another lock any time, even while one is already active.
-            </p>
+            <h3 className="panel-heading">
+              Lock $MINE
+              <InfoTip text="Your $MINE stays yours — you get it all back once the lock ends. While locked it counts as weight (tier multiplier × amount) toward your share of the reward pool. You can open another lock any time, even while one is already active." />
+            </h3>
             <div className="lock-tier-picker">
               {lockTiers.map((tier, i) => (
                 <button
@@ -525,12 +556,10 @@ export function StakingPanel() {
           </div>
 
           <div className="panel">
-            <p className="rules" style={{ marginTop: 0 }}>
-              <strong>Burn:</strong> destroys your $MINE permanently — you never get these tokens back. In exchange
-              you get a weight boost until that tier's own expiry — shorter tiers pay a bigger multiplier since
-              there's no lock-up cost offsetting them the way there is for a lock. It does not pay out anything by
-              itself; check "Pending yield" above, which only grows once new wagers skim more XNT into the pool.
-            </p>
+            <h3 className="panel-heading">
+              Burn $MINE
+              <InfoTip text="Destroys your $MINE permanently — you never get these tokens back. In exchange you get a weight boost until that tier's own expiry — shorter tiers pay a bigger multiplier since there's no lock-up cost offsetting them the way there is for a lock. It doesn't pay out by itself; check Pending yield, which only grows once new wagers skim more XNT into the pool." />
+            </h3>
             <div className="lock-tier-picker">
               {burnTiers.map((tier, i) => (
                 <button
@@ -558,7 +587,7 @@ export function StakingPanel() {
           {positions.length > 0 && (
             <div className="panel">
               <div className="position-list">
-                {positions.map((pos) => {
+                {(showCompleted ? positions : activePositions).map((pos) => {
                   const remaining = Math.max(0, pos.unlockAt - Math.floor(nowTick / 1000));
                   const pending = pendingYieldOf(pos, accRewardPerWeight);
                   const posRatePerHour =
@@ -614,11 +643,15 @@ export function StakingPanel() {
                     </div>
                   );
                 })}
+                {activePositions.length === 0 && !showCompleted && (
+                  <p className="rules-short">Nothing active right now.</p>
+                )}
               </div>
-              <p className="rules" style={{ marginBottom: 0 }}>
-                A background keeper also sweeps expired positions automatically every ~30s — "Withdraw"/"Reap now"
-                just does it immediately instead of waiting.
-              </p>
+              {completedPositions.length > 0 && (
+                <button className="show-completed-btn" onClick={() => setShowCompleted((v) => !v)}>
+                  {showCompleted ? "Hide" : "Show"} completed ({completedPositions.length})
+                </button>
+              )}
             </div>
           )}
 

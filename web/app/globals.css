@@ -85,6 +85,90 @@ header h1::before {
   margin: 0 0 22px;
 }
 
+.rules-short {
+  font-size: 13px;
+  color: #a8a2c0;
+  margin: 0 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #e8e4fb;
+  margin: 0 0 12px;
+}
+
+.info-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.info-tip-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  background: rgba(139, 92, 246, 0.12);
+  color: #b7b0d6;
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.info-tip-btn:hover {
+  background: rgba(139, 92, 246, 0.25);
+  color: #f1eefc;
+}
+
+.info-tip-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.info-tip-popover {
+  position: absolute;
+  top: 22px;
+  left: 0;
+  z-index: 21;
+  width: 260px;
+  max-width: 80vw;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #171129;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #cbc5e2;
+  font-weight: 400;
+}
+
+.show-completed-btn {
+  margin-top: 10px;
+  background: none;
+  border: none;
+  color: #8f88ad;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.show-completed-btn:hover {
+  color: #cbc5e2;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--panel-border);
