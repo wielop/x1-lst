@@ -234,6 +234,17 @@ header h1::before {
   margin: 12px 0 0;
 }
 
+.played-mines-label {
+  font-size: 12px;
+  color: #8f88ad;
+  text-align: center;
+  margin: 0 0 12px;
+}
+
+.played-mines-label strong {
+  color: #c9c4de;
+}
+
 /* --- Result banner: the big dopamine payoff --- */
 .result-banner {
   position: relative;

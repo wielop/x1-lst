@@ -48,6 +48,13 @@ export function MinesGame() {
   const [stuckTiles, setStuckTiles] = useState<Set<number>>(new Set());
   const [mineBalance, setMineBalance] = useState<number | null>(null);
   const [lastResult, setLastResult] = useState<RoundResult | null>(null);
+  // Locked in at start_round — the "Mines" input becomes editable again as
+  // soon as a round ends, so it can drift to a different value (the DRAFT
+  // for the *next* round) while the board on screen still shows the result
+  // of the round just played. Without this, the displayed mine count and
+  // the board's actual mine count can visibly disagree, which reads as a
+  // fairness bug even though the underlying game data was always correct.
+  const [playedMineCount, setPlayedMineCount] = useState<number | null>(null);
 
   const appendLog = useCallback((msg: string) => {
     setLog((prev) => [msg, ...prev].slice(0, 8));
@@ -67,7 +74,8 @@ export function MinesGame() {
     return new Program(idl as Idl, PROGRAM_ID, provider);
   }, [connection, wallet.publicKey, wallet.signTransaction, wallet.signAllTransactions]);
 
-  const currentMultiplier = revealedCount > 0 ? fairMultiplier(revealedCount, mineCount) * (1 - HOUSE_EDGE_BPS / 10_000) : 1;
+  const currentMultiplier =
+    revealedCount > 0 ? fairMultiplier(revealedCount, playedMineCount ?? mineCount) * (1 - HOUSE_EDGE_BPS / 10_000) : 1;
   const currentPayout = revealedCount > 0 ? Number(betAmount) * currentMultiplier : 0;
 
   const startRound = useCallback(async () => {
@@ -96,6 +104,7 @@ export function MinesGame() {
 
       setRoundId(newRoundId);
       setClientSeed(seed);
+      setPlayedMineCount(mineCount);
       setTiles(Array(TOTAL_TILES).fill("hidden"));
       setRevealedCount(0);
       setPendingSince({});
@@ -380,6 +389,15 @@ export function MinesGame() {
       </div>
 
       {lastResult && <ResultBanner result={lastResult} />}
+
+      {playedMineCount !== null && (
+        <p className="played-mines-label">
+          This board was played with <strong>{playedMineCount}</strong> mines
+          {playedMineCount !== mineCount && status !== "active"
+            ? ` (the "Mines" field above is already set for your next round)`
+            : ""}
+        </p>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)` }}>
         {tiles.map((t, i) => (
