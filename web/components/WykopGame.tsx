@@ -90,16 +90,14 @@ function MinerFigure({ struck }: { struck: boolean }) {
       <path d="M 55 95 L 40 138" className="miner-limb" />
       <path d="M 55 95 L 72 138" className="miner-limb" />
       <path d="M 55 50 L 55 95" className="miner-limb" />
-      <path d="M 55 60 L 32 80" className="miner-limb" />
+      <path d="M 55 60 L 35 78" className="miner-limb" />
       <circle cx="55" cy="34" r="16" className="miner-head" />
       <circle cx="65" cy="31" r="3" className="miner-lamp" />
       <g className={`miner-swing-arm${struck ? " struck" : ""}`}>
-        <path d="M 55 60 L 92 42" className="miner-limb" />
-        <g transform="translate(92,42) rotate(-35)">
-          <rect x="-2" y="-2.5" width="32" height="5" rx="2" className="pickaxe-handle" />
-          <path d="M 28 -14 L 42 -30 L 49 -24 L 35 -8 Z" className="pickaxe-head" />
-          <path d="M 28 14 L 42 30 L 49 24 L 35 8 Z" className="pickaxe-head" />
-        </g>
+        <path d="M 55 60 L 90 44" className="miner-limb" />
+        <text x="98" y="40" className="pickaxe-emoji" transform="rotate(-20 98 40)">
+          ⛏️
+        </text>
       </g>
     </svg>
   );

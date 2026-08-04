@@ -989,12 +989,8 @@ header h1::before {
   fill: rgba(0, 0, 0, 0.35);
 }
 
-.miner-figure .pickaxe-handle {
-  fill: #a8703f;
-}
-
-.miner-figure .pickaxe-head {
-  fill: #b7b0d6;
+.miner-figure .pickaxe-emoji {
+  font-size: 30px;
 }
 
 .miner-swing-arm {
