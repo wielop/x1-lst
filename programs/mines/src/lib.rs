@@ -54,6 +54,28 @@ pub const MINT_SEED: &[u8] = b"mine_mint";
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 pub const ROUND_SEED: &[u8] = b"round";
 
+// --- Wykop (time-based mining) ---
+pub const DIG_CONFIG_SEED: &[u8] = b"dig_config";
+pub const DIG_SESSION_SEED: &[u8] = b"dig_session";
+
+/// Exactly 3 duration tiers (30s/60s/90s at launch) — fixed, not extensible,
+/// unlike rarity tiers. Nothing in the design calls for more than a handful
+/// of duration options, so a fixed-size array keeps DigConfig simple.
+pub const DIG_TIER_COUNT: usize = 3;
+
+/// Reserved capacity for rarity tiers, most of it unused at launch (only 2
+/// are populated: Rare, Epic — "Common" is the deterministic floor and
+/// isn't part of this table at all). Sized generously up front so adding a
+/// 3rd/4th/5th tier later is an admin instruction (`update_rarity_tiers`),
+/// not a redeploy or account migration.
+pub const MAX_RARITY_TIERS: usize = 8;
+
+/// Sentinel meaning "no bonus tier hit this dig" — floor-only payout.
+pub const RARITY_NONE: u8 = 0xFF;
+
+/// Fixed-point scale for the staking reward accumulator (Phase B).
+pub const ACC_REWARD_SCALE: u128 = 1_000_000_000_000;
+
 #[program]
 pub mod mines {
     use super::*;
@@ -408,6 +430,210 @@ pub mod mines {
         emit!(LimitsUpdated { min_bet, max_bet });
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // Wykop (time-based mining)
+    // -----------------------------------------------------------------
+
+    /// One-time admin setup for the Wykop game mode, kept as a separate
+    /// account from `Config` (not a migration of it) — `Config` already has
+    /// a hand-computed `LEN` for an already-initialized live PDA, and
+    /// extending that would need account reallocation. A fresh, generously
+    /// reserved account is simpler and matches how `Vault`/`Round` were
+    /// already split out.
+    pub fn initialize_dig_config(
+        ctx: Context<InitializeDigConfig>,
+        tier_prices: [u64; DIG_TIER_COUNT],
+        tier_durations: [u32; DIG_TIER_COUNT],
+        rarity_tiers: Vec<RarityTier>,
+    ) -> Result<()> {
+        require!(rarity_tiers.len() <= MAX_RARITY_TIERS, MinesError::InvalidParam);
+        require!(tier_prices.iter().all(|&p| p > 0), MinesError::InvalidParam);
+
+        let dig_config = &mut ctx.accounts.dig_config;
+        dig_config.admin = ctx.accounts.admin.key();
+        dig_config.tier_prices = tier_prices;
+        dig_config.tier_durations = tier_durations;
+        dig_config.mine_mint = ctx.accounts.config.mine_mint;
+        dig_config.total_sessions = 0;
+        dig_config.bump = ctx.bumps["dig_config"];
+
+        let mut tiers = [RarityTier::default(); MAX_RARITY_TIERS];
+        for (i, t) in rarity_tiers.iter().enumerate() {
+            tiers[i] = *t;
+        }
+        dig_config.rarity_tiers = tiers;
+        dig_config.active_rarity_count = rarity_tiers.len() as u8;
+
+        emit!(DigConfigInitialized {
+            tier_prices,
+            tier_durations,
+            active_rarity_count: dig_config.active_rarity_count,
+        });
+        Ok(())
+    }
+
+    /// Admin-only: repriced/retimed duration tiers without touching rarity
+    /// odds. Same tuning-knob pattern as `update_limits`.
+    pub fn update_dig_tiers(
+        ctx: Context<UpdateDigTiers>,
+        tier_prices: [u64; DIG_TIER_COUNT],
+        tier_durations: [u32; DIG_TIER_COUNT],
+    ) -> Result<()> {
+        let dig_config = &mut ctx.accounts.dig_config;
+        dig_config.tier_prices = tier_prices;
+        dig_config.tier_durations = tier_durations;
+        emit!(DigTiersUpdated { tier_prices, tier_durations });
+        Ok(())
+    }
+
+    /// Admin-only: this is how a 3rd/4th/5th rarity tier gets added later —
+    /// writes into the reserved-but-unused slots of `rarity_tiers`, no
+    /// redeploy or migration needed.
+    pub fn update_rarity_tiers(ctx: Context<UpdateRarityTiers>, rarity_tiers: Vec<RarityTier>) -> Result<()> {
+        require!(rarity_tiers.len() <= MAX_RARITY_TIERS, MinesError::InvalidParam);
+        let dig_config = &mut ctx.accounts.dig_config;
+        let mut tiers = [RarityTier::default(); MAX_RARITY_TIERS];
+        for (i, t) in rarity_tiers.iter().enumerate() {
+            tiers[i] = *t;
+        }
+        dig_config.rarity_tiers = tiers;
+        dig_config.active_rarity_count = rarity_tiers.len() as u8;
+        emit!(RarityTiersUpdated { active_rarity_count: dig_config.active_rarity_count });
+        Ok(())
+    }
+
+    /// Player pays for a dig session. Bumps the *same* `Config.cumulative_volume`
+    /// Mines uses for its emission halving curve — Wykop deliberately does not
+    /// have its own independent emission schedule, so adding this game mode
+    /// doesn't double the rate new $MINE enters circulation.
+    pub fn start_dig(ctx: Context<StartDig>, duration_tier: u8, client_seed: [u8; 32]) -> Result<()> {
+        require!((duration_tier as usize) < DIG_TIER_COUNT, MinesError::InvalidParam);
+        let config = &mut ctx.accounts.config;
+        require!(!config.paused, MinesError::Paused);
+        require!(config.current_seed_hash != [0u8; 32], MinesError::NoSeedCommitted);
+
+        let dig_config = &mut ctx.accounts.dig_config;
+        let price = dig_config.tier_prices[duration_tier as usize];
+
+        invoke(
+            &system_instruction::transfer(&ctx.accounts.player.key(), &ctx.accounts.vault.key(), price),
+            &[
+                ctx.accounts.player.to_account_info(),
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        config.cumulative_volume = config.cumulative_volume.saturating_add(price);
+
+        let session_id = dig_config.total_sessions;
+        dig_config.total_sessions = dig_config.total_sessions.checked_add(1).ok_or(MinesError::MathOverflow)?;
+
+        let session = &mut ctx.accounts.session;
+        session.player = ctx.accounts.player.key();
+        session.session_id = session_id;
+        session.duration_tier = duration_tier;
+        session.bet_amount = price;
+        session.start_ts = Clock::get()?.unix_timestamp;
+        session.seed_commitment = config.current_seed_hash;
+        session.client_seed = client_seed;
+        session.status = DigStatus::Active as u8;
+        session.rarity_hit = RARITY_NONE;
+        session.bump = ctx.bumps["session"];
+
+        emit!(DigStarted {
+            session: session.key(),
+            player: session.player,
+            session_id,
+            duration_tier,
+            bet_amount: price,
+            seed_commitment: session.seed_commitment,
+        });
+        Ok(())
+    }
+
+    /// Resolver-signed settlement, called once the session's real-time
+    /// duration has actually elapsed (enforced on-chain, not just trusted
+    /// client-side) — mints `floor + bonus` directly to the player's ATA in
+    /// this single instruction, so Wykop costs exactly one player
+    /// transaction total (`start_dig`), same "cut unnecessary transactions"
+    /// lesson learned from Mines' `resolve_reveal`.
+    ///
+    /// The floor amount is computed here on-chain from `bet_amount` and the
+    /// shared emission curve — the resolver cannot shortchange it. Only
+    /// `rarity_hit` (which bonus tier, if any) is resolver-attested, since
+    /// only the resolver's secret seed can produce that roll — same trust
+    /// boundary as `is_mine` in `resolve_reveal`.
+    pub fn resolve_dig(ctx: Context<ResolveDig>, rarity_hit: u8) -> Result<()> {
+        let session = &mut ctx.accounts.session;
+        require!(session.status == DigStatus::Active as u8, MinesError::RoundNotActive);
+
+        let dig_config = &ctx.accounts.dig_config;
+        let elapsed = Clock::get()?.unix_timestamp - session.start_ts;
+        let required = dig_config.tier_durations[session.duration_tier as usize] as i64;
+        require!(elapsed >= required, MinesError::DigNotFinished);
+
+        require!(
+            rarity_hit == RARITY_NONE || (rarity_hit as usize) < dig_config.active_rarity_count as usize,
+            MinesError::InvalidParam
+        );
+
+        let config = &ctx.accounts.config;
+        let rate = emission_rate_scaled(config.cumulative_volume);
+        let floor_amount: u64 = ((session.bet_amount as u128)
+            .checked_mul(rate)
+            .ok_or(MinesError::MathOverflow)?
+            .checked_div(EMISSION_SCALE)
+            .ok_or(MinesError::MathOverflow)?)
+        .try_into()
+        .map_err(|_| MinesError::MathOverflow)?;
+
+        let bonus_amount: u64 = if rarity_hit != RARITY_NONE {
+            let tier = dig_config.rarity_tiers[rarity_hit as usize];
+            ((floor_amount as u128)
+                .checked_mul(tier.reward_bps as u128)
+                .ok_or(MinesError::MathOverflow)?
+                .checked_div(10_000)
+                .ok_or(MinesError::MathOverflow)?)
+            .try_into()
+            .map_err(|_| MinesError::MathOverflow)?
+        } else {
+            0
+        };
+
+        let total_mint = floor_amount.checked_add(bonus_amount).ok_or(MinesError::MathOverflow)?;
+
+        if total_mint > 0 {
+            let seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[config.mint_authority_bump]];
+            let signer = &[seeds];
+            token::mint_to(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    MintTo {
+                        mint: ctx.accounts.mine_mint.to_account_info(),
+                        to: ctx.accounts.player_mine_ata.to_account_info(),
+                        authority: ctx.accounts.mint_authority.to_account_info(),
+                    },
+                    signer,
+                ),
+                total_mint,
+            )?;
+        }
+
+        session.status = DigStatus::Resolved as u8;
+        session.rarity_hit = rarity_hit;
+
+        emit!(DigResolved {
+            session: session.key(),
+            session_id: session.session_id,
+            player: session.player,
+            rarity_hit,
+            floor_amount,
+            bonus_amount,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +829,106 @@ pub struct UpdateLimits<'info> {
     pub config: Account<'info, Config>,
 }
 
+#[derive(Accounts)]
+pub struct InitializeDigConfig<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(init, payer = admin, space = DigConfig::LEN, seeds = [DIG_CONFIG_SEED], bump)]
+    pub dig_config: Box<Account<'info, DigConfig>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateDigTiers<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [DIG_CONFIG_SEED], bump = dig_config.bump, has_one = admin)]
+    pub dig_config: Box<Account<'info, DigConfig>>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateRarityTiers<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [DIG_CONFIG_SEED], bump = dig_config.bump, has_one = admin)]
+    pub dig_config: Box<Account<'info, DigConfig>>,
+}
+
+#[derive(Accounts)]
+pub struct StartDig<'info> {
+    #[account(mut)]
+    pub player: Signer<'info>,
+
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(mut, seeds = [DIG_CONFIG_SEED], bump = dig_config.bump)]
+    pub dig_config: Box<Account<'info, DigConfig>>,
+
+    #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
+    pub vault: Box<Account<'info, Vault>>,
+
+    #[account(
+        init,
+        payer = player,
+        space = DigSession::LEN,
+        seeds = [DIG_SESSION_SEED, &dig_config.total_sessions.to_le_bytes()],
+        bump
+    )]
+    pub session: Box<Account<'info, DigSession>>,
+
+    #[account(mut, address = config.mine_mint)]
+    pub mine_mint: Box<Account<'info, Mint>>,
+
+    #[account(
+        init_if_needed,
+        payer = player,
+        associated_token::mint = mine_mint,
+        associated_token::authority = player
+    )]
+    pub player_mine_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ResolveDig<'info> {
+    pub resolver_authority: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = resolver_authority)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(seeds = [DIG_CONFIG_SEED], bump = dig_config.bump)]
+    pub dig_config: Box<Account<'info, DigConfig>>,
+
+    #[account(mut, seeds = [DIG_SESSION_SEED, &session.session_id.to_le_bytes()], bump = session.bump)]
+    pub session: Box<Account<'info, DigSession>>,
+
+    #[account(mut, address = config.mine_mint)]
+    pub mine_mint: Box<Account<'info, Mint>>,
+
+    /// CHECK: signer-only PDA authorizing mint_to CPIs, same one Mines uses.
+    #[account(seeds = [MINT_AUTHORITY_SEED], bump = config.mint_authority_bump)]
+    pub mint_authority: UncheckedAccount<'info>,
+
+    /// CHECK: not a signer here — only used to derive/validate the ATA
+    /// address below. The player already authorized this session's
+    /// existence by signing `start_dig`; the resolver never needs their
+    /// signature again.
+    #[account(address = session.player)]
+    pub player: UncheckedAccount<'info>,
+
+    #[account(mut, associated_token::mint = mine_mint, associated_token::authority = player)]
+    pub player_mine_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -671,6 +997,66 @@ pub struct Vault {
 
 impl Vault {
     pub const LEN: usize = 8 + 1;
+}
+
+/// One rarity tier's bonus payout, on top of the deterministic floor.
+/// `reward_bps` is a *multiplier on the floor amount* (e.g. 20_000 = +200%,
+/// i.e. floor x3 total) — this is the tier's fixed "size." How often it
+/// hits is controlled separately in the resolver via `base_chance_bps` and
+/// `duration_scaling`, which is where "longer dig = disproportionately
+/// better odds" lives (a chance lever, not a size lever).
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
+pub struct RarityTier {
+    pub reward_bps: u32,
+    pub base_chance_bps: u16,
+    pub duration_scaling: [u16; DIG_TIER_COUNT],
+}
+
+#[account]
+pub struct DigConfig {
+    pub admin: Pubkey,
+    pub mine_mint: Pubkey,
+    pub tier_prices: [u64; DIG_TIER_COUNT],
+    pub tier_durations: [u32; DIG_TIER_COUNT],
+    pub rarity_tiers: [RarityTier; MAX_RARITY_TIERS],
+    pub active_rarity_count: u8,
+    pub total_sessions: u64,
+    pub bump: u8,
+}
+
+impl DigConfig {
+    pub const LEN: usize = 8
+        + 32 * 2
+        + 8 * DIG_TIER_COUNT
+        + 4 * DIG_TIER_COUNT
+        + (4 + 2 + 2 * DIG_TIER_COUNT) * MAX_RARITY_TIERS
+        + 1
+        + 8
+        + 1;
+}
+
+#[repr(u8)]
+pub enum DigStatus {
+    Active = 0,
+    Resolved = 1,
+}
+
+#[account]
+pub struct DigSession {
+    pub player: Pubkey,
+    pub session_id: u64,
+    pub duration_tier: u8,
+    pub bet_amount: u64,
+    pub start_ts: i64,
+    pub seed_commitment: [u8; 32],
+    pub client_seed: [u8; 32],
+    pub status: u8,
+    pub rarity_hit: u8,
+    pub bump: u8,
+}
+
+impl DigSession {
+    pub const LEN: usize = 8 + 32 + 8 + 1 + 8 + 8 + 32 + 32 + 1 + 1 + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +1153,44 @@ pub struct LimitsUpdated {
     pub max_bet: u64,
 }
 
+#[event]
+pub struct DigConfigInitialized {
+    pub tier_prices: [u64; DIG_TIER_COUNT],
+    pub tier_durations: [u32; DIG_TIER_COUNT],
+    pub active_rarity_count: u8,
+}
+
+#[event]
+pub struct DigTiersUpdated {
+    pub tier_prices: [u64; DIG_TIER_COUNT],
+    pub tier_durations: [u32; DIG_TIER_COUNT],
+}
+
+#[event]
+pub struct RarityTiersUpdated {
+    pub active_rarity_count: u8,
+}
+
+#[event]
+pub struct DigStarted {
+    pub session: Pubkey,
+    pub player: Pubkey,
+    pub session_id: u64,
+    pub duration_tier: u8,
+    pub bet_amount: u64,
+    pub seed_commitment: [u8; 32],
+}
+
+#[event]
+pub struct DigResolved {
+    pub session: Pubkey,
+    pub session_id: u64,
+    pub player: Pubkey,
+    pub rarity_hit: u8,
+    pub floor_amount: u64,
+    pub bonus_amount: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -797,6 +1221,8 @@ pub enum MinesError {
     InvalidParam,
     #[msg("bankroll has insufficient balance")]
     InsufficientBankroll,
+    #[msg("dig session's duration has not elapsed yet")]
+    DigNotFinished,
 }
 
 // ---------------------------------------------------------------------------

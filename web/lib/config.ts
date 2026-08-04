@@ -12,6 +12,10 @@ export const MULT_SCALE = 1_000_000;
 export const CONFIG_SEED = Buffer.from("config");
 export const VAULT_SEED = Buffer.from("vault");
 export const ROUND_SEED = Buffer.from("round");
+export const DIG_CONFIG_SEED = Buffer.from("dig_config");
+export const DIG_SESSION_SEED = Buffer.from("dig_session");
+
+export const DIG_TIER_LABELS = ["30s", "60s", "90s"] as const;
 
 export function configPda(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([CONFIG_SEED], PROGRAM_ID);
@@ -25,6 +29,16 @@ export function roundPda(roundId: bigint): [PublicKey, number] {
   const buf = Buffer.alloc(8);
   buf.writeBigUInt64LE(roundId);
   return PublicKey.findProgramAddressSync([ROUND_SEED, buf], PROGRAM_ID);
+}
+
+export function digConfigPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([DIG_CONFIG_SEED], PROGRAM_ID);
+}
+
+export function digSessionPda(sessionId: bigint): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(sessionId);
+  return PublicKey.findProgramAddressSync([DIG_SESSION_SEED, buf], PROGRAM_ID);
 }
 
 /** Fair (zero-house-edge) hypergeometric multiplier, mirrors the on-chain formula. */

@@ -1,10 +1,22 @@
 import http from "node:http";
 import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import fs from "node:fs";
-import { PROGRAM_ID, RPC_URL, RESOLVER_KEYPAIR_PATH, SEED_STORE_PATH, configPda, roundPda } from "./config.js";
+import {
+  PROGRAM_ID,
+  RPC_URL,
+  RESOLVER_KEYPAIR_PATH,
+  SEED_STORE_PATH,
+  configPda,
+  roundPda,
+  digConfigPda,
+  digSessionPda,
+  mintAuthorityPda,
+} from "./config.js";
 import { loadStore, findSeedByHash, type SeedStoreData } from "./seedStore.js";
 import { deriveMineSet } from "./mineLayout.js";
+import { deriveDigOutcome, type RarityTierConfig } from "./digOutcome.js";
 import { minesIdl } from "./idl.js";
 
 const PORT = Number(process.env.RESOLVER_PORT ?? 8787);
@@ -90,6 +102,85 @@ export function startHttpServer(): void {
         const mineSet = deriveMineSet(Buffer.from(record.raw, "hex"), roundId, clientSeed, mineCount);
         sendJson(res, 200, { mines: [...mineSet].sort((a, b) => a - b) });
       } catch (err: any) {
+        sendJson(res, 500, { error: String(err.message ?? err) });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/dig-reveal") {
+      try {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+
+        const sessionId = BigInt(body.sessionId);
+        const [session] = digSessionPda(sessionId);
+        const [digConfig] = digConfigPda();
+
+        const sessionAccount: any = await (program.account as any).digSession.fetch(session);
+        const digConfigAccount: any = await (program.account as any).digConfig.fetch(digConfig);
+
+        if (sessionAccount.status !== 0) {
+          sendJson(res, 409, { error: "dig session is not active" });
+          return;
+        }
+
+        const requiredSeconds = digConfigAccount.tierDurations[sessionAccount.durationTier];
+        const elapsedSeconds = Math.floor(Date.now() / 1000) - Number(sessionAccount.startTs);
+        if (elapsedSeconds < requiredSeconds) {
+          sendJson(res, 409, {
+            error: "dig session hasn't finished yet",
+            secondsRemaining: requiredSeconds - elapsedSeconds,
+          });
+          return;
+        }
+
+        const seedCommitment = bytesToHex(sessionAccount.seedCommitment);
+        const record = findSeedByHash(store, seedCommitment);
+        if (!record) {
+          sendJson(res, 500, { error: "unknown seed commitment for this session" });
+          return;
+        }
+
+        const activeCount: number = digConfigAccount.activeRarityCount;
+        const rarityTiers: RarityTierConfig[] = digConfigAccount.rarityTiers.slice(0, activeCount).map((t: any) => ({
+          rewardBps: t.rewardBps,
+          baseChanceBps: t.baseChanceBps,
+          durationScaling: t.durationScaling,
+        }));
+
+        const clientSeed = Buffer.from(sessionAccount.clientSeed);
+        const rarityHit = deriveDigOutcome(
+          Buffer.from(record.raw, "hex"),
+          sessionId,
+          clientSeed,
+          sessionAccount.durationTier,
+          rarityTiers,
+        );
+
+        const config_ = configPda()[0];
+        const mintAuthority = mintAuthorityPda()[0];
+        const playerMineAta = getAssociatedTokenAddressSync(digConfigAccount.mineMint, sessionAccount.player);
+
+        await program.methods
+          .resolveDig(rarityHit)
+          .accounts({
+            resolverAuthority: resolverKeypair.publicKey,
+            config: config_,
+            digConfig,
+            session,
+            mineMint: digConfigAccount.mineMint,
+            mintAuthority,
+            player: sessionAccount.player,
+            playerMineAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc();
+
+        console.log(`[resolver] dig session ${sessionId} -> rarity ${rarityHit === 0xff ? "none" : rarityHit}`);
+        sendJson(res, 200, { rarityHit });
+      } catch (err: any) {
+        console.error("[resolver] /dig-reveal failed", err);
         sendJson(res, 500, { error: String(err.message ?? err) });
       }
       return;

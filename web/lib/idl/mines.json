@@ -488,6 +488,287 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "initializeDigConfig",
+      "docs": [
+        "One-time admin setup for the Wykop game mode, kept as a separate",
+        "account from `Config` (not a migration of it) — `Config` already has",
+        "a hand-computed `LEN` for an already-initialized live PDA, and",
+        "extending that would need account reallocation. A fresh, generously",
+        "reserved account is simpler and matches how `Vault`/`Round` were",
+        "already split out."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "digConfig",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "tierPrices",
+          "type": {
+            "array": [
+              "u64",
+              3
+            ]
+          }
+        },
+        {
+          "name": "tierDurations",
+          "type": {
+            "array": [
+              "u32",
+              3
+            ]
+          }
+        },
+        {
+          "name": "rarityTiers",
+          "type": {
+            "vec": {
+              "defined": "RarityTier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "updateDigTiers",
+      "docs": [
+        "Admin-only: repriced/retimed duration tiers without touching rarity",
+        "odds. Same tuning-knob pattern as `update_limits`."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "digConfig",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "tierPrices",
+          "type": {
+            "array": [
+              "u64",
+              3
+            ]
+          }
+        },
+        {
+          "name": "tierDurations",
+          "type": {
+            "array": [
+              "u32",
+              3
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "updateRarityTiers",
+      "docs": [
+        "Admin-only: this is how a 3rd/4th/5th rarity tier gets added later —",
+        "writes into the reserved-but-unused slots of `rarity_tiers`, no",
+        "redeploy or migration needed."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "digConfig",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "rarityTiers",
+          "type": {
+            "vec": {
+              "defined": "RarityTier"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "startDig",
+      "docs": [
+        "Player pays for a dig session. Bumps the *same* `Config.cumulative_volume`",
+        "Mines uses for its emission halving curve — Wykop deliberately does not",
+        "have its own independent emission schedule, so adding this game mode",
+        "doesn't double the rate new $MINE enters circulation."
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "digConfig",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "session",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "playerMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "associatedTokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "durationTier",
+          "type": "u8"
+        },
+        {
+          "name": "clientSeed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "resolveDig",
+      "docs": [
+        "Resolver-signed settlement, called once the session's real-time",
+        "duration has actually elapsed (enforced on-chain, not just trusted",
+        "client-side) — mints `floor + bonus` directly to the player's ATA in",
+        "this single instruction, so Wykop costs exactly one player",
+        "transaction total (`start_dig`), same \"cut unnecessary transactions\"",
+        "lesson learned from Mines' `resolve_reveal`.",
+        "",
+        "The floor amount is computed here on-chain from `bet_amount` and the",
+        "shared emission curve — the resolver cannot shortchange it. Only",
+        "`rarity_hit` (which bonus tier, if any) is resolver-attested, since",
+        "only the resolver's secret seed can produce that roll — same trust",
+        "boundary as `is_mine` in `resolve_reveal`."
+      ],
+      "accounts": [
+        {
+          "name": "resolverAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "digConfig",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "session",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mintAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "player",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "address below. The player already authorized this session's",
+            "existence by signing `start_dig`; the resolver never needs their",
+            "signature again."
+          ]
+        },
+        {
+          "name": "playerMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "rarityHit",
+          "type": "u8"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -653,9 +934,157 @@
           }
         ]
       }
+    },
+    {
+      "name": "DigConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "publicKey"
+          },
+          {
+            "name": "mineMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "tierPrices",
+            "type": {
+              "array": [
+                "u64",
+                3
+              ]
+            }
+          },
+          {
+            "name": "tierDurations",
+            "type": {
+              "array": [
+                "u32",
+                3
+              ]
+            }
+          },
+          {
+            "name": "rarityTiers",
+            "type": {
+              "array": [
+                {
+                  "defined": "RarityTier"
+                },
+                8
+              ]
+            }
+          },
+          {
+            "name": "activeRarityCount",
+            "type": "u8"
+          },
+          {
+            "name": "totalSessions",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DigSession",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "publicKey"
+          },
+          {
+            "name": "sessionId",
+            "type": "u64"
+          },
+          {
+            "name": "durationTier",
+            "type": "u8"
+          },
+          {
+            "name": "betAmount",
+            "type": "u64"
+          },
+          {
+            "name": "startTs",
+            "type": "i64"
+          },
+          {
+            "name": "seedCommitment",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "clientSeed",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "rarityHit",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
     }
   ],
   "types": [
+    {
+      "name": "RarityTier",
+      "docs": [
+        "One rarity tier's bonus payout, on top of the deterministic floor.",
+        "`reward_bps` is a *multiplier on the floor amount* (e.g. 20_000 = +200%,",
+        "i.e. floor x3 total) — this is the tier's fixed \"size.\" How often it",
+        "hits is controlled separately in the resolver via `base_chance_bps` and",
+        "`duration_scaling`, which is where \"longer dig = disproportionately",
+        "better odds\" lives (a chance lever, not a size lever)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "rewardBps",
+            "type": "u32"
+          },
+          {
+            "name": "baseChanceBps",
+            "type": "u16"
+          },
+          {
+            "name": "durationScaling",
+            "type": {
+              "array": [
+                "u16",
+                3
+              ]
+            }
+          }
+        ]
+      }
+    },
     {
       "name": "RoundStatus",
       "type": {
@@ -669,6 +1098,20 @@
           },
           {
             "name": "Busted"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DigStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Resolved"
           }
         ]
       }
@@ -984,6 +1427,146 @@
           "index": false
         }
       ]
+    },
+    {
+      "name": "DigConfigInitialized",
+      "fields": [
+        {
+          "name": "tierPrices",
+          "type": {
+            "array": [
+              "u64",
+              3
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "tierDurations",
+          "type": {
+            "array": [
+              "u32",
+              3
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "activeRarityCount",
+          "type": "u8",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "DigTiersUpdated",
+      "fields": [
+        {
+          "name": "tierPrices",
+          "type": {
+            "array": [
+              "u64",
+              3
+            ]
+          },
+          "index": false
+        },
+        {
+          "name": "tierDurations",
+          "type": {
+            "array": [
+              "u32",
+              3
+            ]
+          },
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "RarityTiersUpdated",
+      "fields": [
+        {
+          "name": "activeRarityCount",
+          "type": "u8",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "DigStarted",
+      "fields": [
+        {
+          "name": "session",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "sessionId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "durationTier",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "betAmount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "seedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "DigResolved",
+      "fields": [
+        {
+          "name": "session",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "sessionId",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "player",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "rarityHit",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "floorAmount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "bonusAmount",
+          "type": "u64",
+          "index": false
+        }
+      ]
     }
   ],
   "errors": [
@@ -1046,6 +1629,11 @@
       "code": 6011,
       "name": "InsufficientBankroll",
       "msg": "bankroll has insufficient balance"
+    },
+    {
+      "code": 6012,
+      "name": "DigNotFinished",
+      "msg": "dig session's duration has not elapsed yet"
     }
   ]
 }

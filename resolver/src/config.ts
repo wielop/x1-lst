@@ -10,6 +10,9 @@ export const SEED_STORE_PATH = process.env.SEED_STORE_PATH ?? "./seed-store.json
 
 export const CONFIG_SEED = Buffer.from("config");
 export const ROUND_SEED = Buffer.from("round");
+export const DIG_CONFIG_SEED = Buffer.from("dig_config");
+export const DIG_SESSION_SEED = Buffer.from("dig_session");
+export const MINT_AUTHORITY_SEED = Buffer.from("mint_authority");
 
 export function roundPda(roundId: bigint): [PublicKey, number] {
   const buf = Buffer.alloc(8);
@@ -19,4 +22,18 @@ export function roundPda(roundId: bigint): [PublicKey, number] {
 
 export function configPda(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([CONFIG_SEED], PROGRAM_ID);
+}
+
+export function digConfigPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([DIG_CONFIG_SEED], PROGRAM_ID);
+}
+
+export function digSessionPda(sessionId: bigint): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(sessionId);
+  return PublicKey.findProgramAddressSync([DIG_SESSION_SEED, buf], PROGRAM_ID);
+}
+
+export function mintAuthorityPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([MINT_AUTHORITY_SEED], PROGRAM_ID);
 }
