@@ -14,6 +14,8 @@ import {
   digSessionPda,
   stakingPoolPda,
   rewardVaultPda,
+  poolXntVaultPda,
+  poolMineVaultPda,
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
@@ -44,6 +46,7 @@ export function WykopGame() {
   const [secondsLeft, setSecondsLeft] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
   const [crystalsShown, setCrystalsShown] = useState(0);
+  const [floorEstimate, setFloorEstimate] = useState(0);
   const [particles, setParticles] = useState<Particle[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -133,12 +136,16 @@ export function WykopGame() {
           if (cancelled) return;
           const duration = cfg.tierDurations[acc.durationTier];
           const elapsed = Math.floor(Date.now() / 1000) - Number(acc.startTs);
+          const betAmount = BigInt(cfg.tierPrices[acc.durationTier].toString());
+          const floor = await fetchFloorEstimate(program, connection, betAmount);
+          if (cancelled) return;
           setSessionId(id);
           setDurationTier(acc.durationTier);
           setTotalDuration(duration);
+          setFloorEstimate(floor);
           if (elapsed >= duration) {
             setSecondsLeft(0);
-            setCrystalsShown(estimateFloor(cfg, acc.durationTier));
+            setCrystalsShown(floor);
             setStatus("resolving");
           } else {
             setSecondsLeft(duration - elapsed);
@@ -198,6 +205,9 @@ export function WykopGame() {
 
       setSessionId(newSessionId);
       const duration = digConfigData.tierDurations[durationTier];
+      const betAmount = BigInt(digConfigData.tierPrices[durationTier].toString());
+      const floor = await fetchFloorEstimate(program, connection, betAmount);
+      setFloorEstimate(floor);
       setSecondsLeft(duration);
       setTotalDuration(duration);
       setCrystalsShown(0);
@@ -218,7 +228,6 @@ export function WykopGame() {
   // happening, instead of a bare progress bar with a number next to it.
   useEffect(() => {
     if (status !== "digging" || !digConfigData || totalDuration <= 0) return;
-    const floorEstimate = estimateFloor(digConfigData, durationTier);
     const tickMs = 450;
     const totalTicks = Math.max(1, Math.floor((totalDuration * 1000) / tickMs));
     let tick = Math.max(0, totalTicks - Math.ceil((secondsLeft * 1000) / tickMs));
@@ -417,12 +426,51 @@ export function WykopGame() {
   );
 }
 
-/** Client-side mirror of the on-chain floor formula, for the cosmetic animation only. */
-function estimateFloor(digConfigData: any, durationTier: number): number {
-  const price = Number(digConfigData.tierPrices[durationTier]);
-  // Emission rate/pool price aren't known client-side without extra
-  // fetches; the animation uses a conservative flat estimate since it's
-  // purely cosmetic — the real amount is whatever resolve_dig actually
-  // mints, which the result banner shows exactly.
-  return price / 1e6;
+// Mirrors VOLUME_THRESHOLDS / EMISSION_SCALE in programs/mines/src/lib.rs —
+// keep in sync if the on-chain schedule changes.
+const EMISSION_SCALE = 1_000_000n;
+const LAMPORTS_PER_XNT = 1_000_000_000n;
+const VOLUME_THRESHOLDS: [bigint, bigint][] = [
+  [1_000_000n * LAMPORTS_PER_XNT, 1_000_000n],
+  [5_000_000n * LAMPORTS_PER_XNT, 500_000n],
+  [20_000_000n * LAMPORTS_PER_XNT, 250_000n],
+  [80_000_000n * LAMPORTS_PER_XNT, 125_000n],
+  [(1n << 64n) - 1n, 62_500n],
+];
+
+function emissionRateScaled(cumulativeVolume: bigint): bigint {
+  for (const [threshold, rate] of VOLUME_THRESHOLDS) {
+    if (cumulativeVolume < threshold) return rate;
+  }
+  return VOLUME_THRESHOLDS[VOLUME_THRESHOLDS.length - 1][1];
+}
+
+/**
+ * Client-side mirror of resolve_dig's price-aware floor formula in
+ * programs/mines/src/lib.rs — fetches the same live inputs (cumulative
+ * volume, pool reserves) the program reads, so the cosmetic counter tracks
+ * what resolve_dig will actually mint instead of an unrelated placeholder.
+ * Falls back to 0 on any fetch failure (animation-only, never blocks play).
+ */
+async function fetchFloorEstimate(program: any, connection: any, betAmountLamports: bigint): Promise<number> {
+  try {
+    const [config] = configPda();
+    const configData: any = await program.account.config.fetch(config);
+    const cumulativeVolume = BigInt(configData.cumulativeVolume.toString());
+    const rate = emissionRateScaled(cumulativeVolume);
+    const targetXntValue = (betAmountLamports * rate) / EMISSION_SCALE;
+
+    const [poolXntVault] = poolXntVaultPda();
+    const [poolMineVault] = poolMineVaultPda();
+    const xntVaultInfo = await connection.getAccountInfo(poolXntVault);
+    const reserveXnt = xntVaultInfo ? BigInt(xntVaultInfo.lamports) : 0n;
+    const mineVaultBalance = await connection.getTokenAccountBalance(poolMineVault).catch(() => null);
+    const reserveMine = mineVaultBalance ? BigInt(mineVaultBalance.value.amount) : 0n;
+
+    const floorRaw =
+      reserveXnt > 0n && reserveMine > 0n ? (targetXntValue * reserveMine) / reserveXnt : targetXntValue;
+    return Number(floorRaw) / 1e6;
+  } catch {
+    return 0;
+  }
 }

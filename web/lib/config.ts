@@ -58,7 +58,9 @@ export function stakeTokenVaultPda(): [PublicKey, number] {
 }
 
 export function stakePositionPda(owner: PublicKey): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("stake_position_v2"), owner.toBuffer()], PROGRAM_ID);
+  // v3, not v2 — bumped when StakePosition gained `unclaimed_lamports`
+  // (see the comment on that field / claim_yield in lib.rs).
+  return PublicKey.findProgramAddressSync([Buffer.from("stake_position_v3"), owner.toBuffer()], PROGRAM_ID);
 }
 
 export function liquidityPoolPda(): [PublicKey, number] {
