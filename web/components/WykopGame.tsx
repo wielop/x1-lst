@@ -19,10 +19,24 @@ import {
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
-type Status = "idle" | "digging" | "resolving" | "done";
+type Status = "idle" | "digging" | "resolving" | "revealing" | "done";
 type RarityInfo = { rewardBps: number; baseChanceBps: number; durationScaling: number[] };
 type DigResult = { rarityHit: number; mineEarned: number } | null;
 type Particle = { id: number; left: number; emoji: string; big: boolean };
+type Popup = { id: number; amount: number };
+
+const STRIKE_MS = 4000;
+
+/** Splits `total` into `n` positive, deliberately UNEVEN chunks that sum to
+ * `total` — each pickaxe strike lands a different-sized chunk instead of a
+ * smooth linear drip, per the "1 strike = 1 uneven chunk" request. */
+function unevenSplit(total: number, n: number): number[] {
+  if (n <= 0) return [];
+  if (total <= 0) return Array.from({ length: n }, () => 0);
+  const weights = Array.from({ length: n }, () => 0.25 + Math.random());
+  const sum = weights.reduce((a, b) => a + b, 0);
+  return weights.map((w) => (w / sum) * total);
+}
 
 const RARITY_NAMES = ["Rare", "Epic", "Legendary", "Mythic", "Tier 5", "Tier 6", "Tier 7", "Tier 8"];
 const RARITY_COLORS = ["#60a5fa", "#c084fc", "#fbbf24", "#f472b6"];
@@ -48,13 +62,17 @@ export function WykopGame() {
   const [crystalsShown, setCrystalsShown] = useState(0);
   const [floorEstimate, setFloorEstimate] = useState(0);
   const [particles, setParticles] = useState<Particle[]>([]);
+  const [popups, setPopups] = useState<Popup[]>([]);
+  const [strikeKey, setStrikeKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mineBalance, setMineBalance] = useState<number | null>(null);
   const [result, setResult] = useState<DigResult>(null);
   const [resuming, setResuming] = useState(true);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const strikeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const particleIdRef = useRef(0);
+  const popupIdRef = useRef(0);
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -221,35 +239,62 @@ export function WykopGame() {
     }
   }, [program, wallet.publicKey, digConfigData, durationTier, refreshDigConfig]);
 
-  // Cosmetic countdown + crystal-drip animation — purely client-side, no
-  // on-chain state per tick. The single real settlement happens once, when
-  // the timer hits zero (see the effect below). Spawns a little particle
-  // on every tick so the wait actually *feels* like something is
-  // happening, instead of a bare progress bar with a number next to it.
+  // Cosmetic 1s countdown, decoupled from the strike cadence below — purely
+  // client-side, no on-chain state per tick. Ends the dig at zero.
   useEffect(() => {
-    if (status !== "digging" || !digConfigData || totalDuration <= 0) return;
-    const tickMs = 450;
-    const totalTicks = Math.max(1, Math.floor((totalDuration * 1000) / tickMs));
-    let tick = Math.max(0, totalTicks - Math.ceil((secondsLeft * 1000) / tickMs));
-
+    if (status !== "digging" || totalDuration <= 0) return;
     timerRef.current = setInterval(() => {
-      tick++;
-      setSecondsLeft(Math.max(0, totalDuration - Math.floor((tick * tickMs) / 1000)));
-      setCrystalsShown(Math.min(floorEstimate, (floorEstimate * tick) / totalTicks));
-
-      const isBig = tick % 5 === 0;
-      const emoji = isBig ? "💎" : Math.random() < 0.7 ? "✨" : "💎";
-      const id = particleIdRef.current++;
-      setParticles((prev) => [...prev.slice(-11), { id, left: 8 + Math.random() * 84, emoji, big: isBig }]);
-
-      if (tick >= totalTicks) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        setStatus("resolving");
-      }
-    }, tickMs);
-
+      setSecondsLeft((s) => {
+        if (s <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          setStatus("resolving");
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [status, totalDuration]);
+
+  // Pickaxe strikes every STRIKE_MS — one strike = one uneven chunk of the
+  // estimated floor landing at once (per the "1 kopnięcie = 1 naliczenie,
+  // zawsze nierównomiernej" request), instead of a smooth linear drip. The
+  // single real settlement still only happens once, when the countdown
+  // above hits zero (see the resolving effect below) — this is purely a
+  // cosmetic "does it feel like mining" pass.
+  useEffect(() => {
+    if (status !== "digging" || !digConfigData || totalDuration <= 0) return;
+    const remainingTicks = Math.max(1, Math.round((secondsLeft * 1000) / STRIKE_MS));
+    const remainingTotal = Math.max(0, floorEstimate - crystalsShown);
+    const increments = unevenSplit(remainingTotal, remainingTicks);
+    let tickIndex = 0;
+
+    strikeTimerRef.current = setInterval(() => {
+      const amount = increments[tickIndex] ?? 0;
+      tickIndex++;
+
+      setCrystalsShown((prev) => Math.min(floorEstimate, prev + amount));
+      setStrikeKey((k) => k + 1);
+      setPopups((prev) => [...prev.slice(-3), { id: popupIdRef.current++, amount }]);
+
+      const burstSize = 5 + Math.floor(Math.random() * 3);
+      const burst: Particle[] = Array.from({ length: burstSize }, () => ({
+        id: particleIdRef.current++,
+        left: 20 + Math.random() * 60,
+        emoji: Math.random() < 0.55 ? "💎" : "✨",
+        big: Math.random() < 0.35,
+      }));
+      setParticles((prev) => [...prev.slice(-16), ...burst]);
+
+      if (tickIndex >= increments.length) {
+        if (strikeTimerRef.current) clearInterval(strikeTimerRef.current);
+      }
+    }, STRIKE_MS);
+
+    return () => {
+      if (strikeTimerRef.current) clearInterval(strikeTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, totalDuration]);
@@ -284,6 +329,13 @@ export function WykopGame() {
               rarityHit: sessionAccount.rarityHit,
               mineEarned: Math.max(0, balanceAfter - balanceBefore),
             });
+            // Play the reveal (flash/gem/+amount) as one last big strike in
+            // the mine scene itself, instead of jumping straight to a flat
+            // end screen — this is the actual win moment, so it needs to
+            // happen where the player is looking, not after it.
+            setStatus("revealing");
+            await new Promise((r) => setTimeout(r, 2300));
+            if (cancelled) return;
             setStatus("done");
             return;
           }
@@ -357,51 +409,104 @@ export function WykopGame() {
         </div>
       )}
 
-      {(status === "digging" || status === "resolving") && digConfigData && (
+      {(status === "digging" || status === "resolving" || status === "revealing") && digConfigData && (
         <div className="panel dig-active">
-          <div className="dig-timer">{status === "digging" ? `${secondsLeft}s` : "Settling..."}</div>
-
-          <div className="crystal-stream">
-            {particles.map((p) => (
-              <span
-                key={p.id}
-                className={`crystal-particle${p.big ? " big" : ""}`}
-                style={{ left: `${p.left}%` }}
-              >
-                {p.emoji}
-              </span>
-            ))}
+          <div className="dig-timer">
+            {status === "digging" ? `${secondsLeft}s` : status === "resolving" ? "Final strike..." : ""}
           </div>
 
-          <div className="crystal-counter" key={Math.floor(crystalsShown * 10)}>
-            <span className="crystal-icon">💎</span>
-            {crystalsShown.toFixed(1)} $MINE
+          <div className={`mine-scene${status === "resolving" ? " charging" : ""}`}>
+            <div className="crystal-stream">
+              {particles.map((p) => (
+                <span
+                  key={p.id}
+                  className={`crystal-particle${p.big ? " big" : ""}`}
+                  style={{ left: `${p.left}%` }}
+                >
+                  {p.emoji}
+                </span>
+              ))}
+            </div>
+
+            {status !== "revealing" && (
+              <>
+                <span className={`mine-rock hit`} key={strikeKey}>
+                  🪨
+                </span>
+                <span className="pickaxe">⛏️</span>
+                {popups.map((p) => (
+                  <span
+                    key={p.id}
+                    className="strike-popup"
+                    style={{ left: `${30 + Math.random() * 40}%` }}
+                  >
+                    +{p.amount.toFixed(1)}
+                  </span>
+                ))}
+              </>
+            )}
+
+            {status === "revealing" && result && (
+              <div className="reveal-overlay">
+                <div className={`reveal-flash${result.rarityHit === 0xff ? " common" : ""}`} />
+                {result.rarityHit !== 0xff && (
+                  <div className="confetti">
+                    {Array.from({ length: 30 }, (_, i) => (
+                      <span
+                        key={i}
+                        style={{
+                          left: `${Math.random() * 100}%`,
+                          animationDelay: `${Math.random() * 0.3}s`,
+                          background: RARITY_COLORS[result.rarityHit % RARITY_COLORS.length],
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+                <div
+                  className="reveal-gem"
+                  style={
+                    result.rarityHit !== 0xff
+                      ? { filter: `drop-shadow(0 0 24px ${RARITY_COLORS[result.rarityHit % RARITY_COLORS.length]})` }
+                      : undefined
+                  }
+                >
+                  💎
+                </div>
+                {result.rarityHit !== 0xff && (
+                  <div
+                    className="reveal-rarity"
+                    style={{ color: RARITY_COLORS[result.rarityHit % RARITY_COLORS.length] }}
+                  >
+                    {RARITY_NAMES[result.rarityHit] ?? "Bonus"} find!
+                  </div>
+                )}
+                <div className="reveal-text">+{result.mineEarned.toFixed(2)} $MINE</div>
+              </div>
+            )}
           </div>
-          <div className="dig-progress-track">
-            <div
-              className="dig-progress-fill"
-              style={{ width: `${totalDuration > 0 ? ((totalDuration - secondsLeft) / totalDuration) * 100 : 0}%` }}
-            />
-          </div>
+
+          {status !== "revealing" && (
+            <div className="crystal-counter" key={Math.floor(crystalsShown * 10)}>
+              <span className="crystal-icon">💎</span>
+              {crystalsShown.toFixed(1)} $MINE
+            </div>
+          )}
+          {status === "digging" && (
+            <div className="dig-progress-track">
+              <div
+                className="dig-progress-fill"
+                style={{
+                  width: `${totalDuration > 0 ? ((totalDuration - secondsLeft) / totalDuration) * 100 : 0}%`,
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
 
       {status === "done" && result && (
         <div className={`result-banner ${result.rarityHit === 0xff ? "win" : "win jackpot"}`}>
-          {result.rarityHit !== 0xff && (
-            <div className="confetti">
-              {Array.from({ length: 30 }, (_, i) => (
-                <span
-                  key={i}
-                  style={{
-                    left: `${Math.random() * 100}%`,
-                    animationDelay: `${Math.random() * 0.3}s`,
-                    background: RARITY_COLORS[result.rarityHit % RARITY_COLORS.length],
-                  }}
-                />
-              ))}
-            </div>
-          )}
           <div className="result-headline">
             {result.rarityHit === 0xff ? "Dig complete" : `${RARITY_NAMES[result.rarityHit] ?? "Bonus"} find!`}
           </div>
