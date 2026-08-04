@@ -4,26 +4,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { PROGRAM_ID } from "@/lib/config";
+import { SystemProgram } from "@solana/web3.js";
+import {
+  PROGRAM_ID,
+  stakingPoolPda,
+  stakingAuthorityPda,
+  rewardVaultPda,
+  stakeTokenVaultPda,
+  stakePositionPda,
+} from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
 const ACC_REWARD_SCALE = 1_000_000_000_000n;
 
-function stakingPoolPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("staking_pool")], PROGRAM_ID);
-}
-function stakingAuthorityPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("staking_authority")], PROGRAM_ID);
-}
-function rewardVaultPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("reward_vault")], PROGRAM_ID);
-}
-function stakeTokenVaultPda(): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("stake_token_vault")], PROGRAM_ID);
-}
-function stakePositionPda(owner: PublicKey): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([Buffer.from("stake_position"), owner.toBuffer()], PROGRAM_ID);
+function weightOf(pos: any): bigint {
+  if (!pos) return 0n;
+  return BigInt(pos.lockedWeight.toString()) + BigInt(pos.burnedWeight.toString());
 }
 
 export function StakingPanel() {
@@ -34,6 +30,8 @@ export function StakingPanel() {
   const [positionData, setPositionData] = useState<any>(null);
   const [mineWalletBalance, setMineWalletBalance] = useState<number | null>(null);
   const [amount, setAmount] = useState("10");
+  const [lockTier, setLockTier] = useState(0);
+  const [burnAmount, setBurnAmount] = useState("5");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -82,19 +80,21 @@ export function StakingPanel() {
 
   const pendingYield = useMemo(() => {
     if (!positionData || !poolData) return 0;
-    const accrued =
-      (BigInt(positionData.stakedAmount.toString()) * BigInt(poolData.accRewardPerShare.toString())) /
-      ACC_REWARD_SCALE;
+    const accrued = (weightOf(positionData) * BigInt(poolData.accRewardPerWeight.toString())) / ACC_REWARD_SCALE;
     const debt = BigInt(positionData.rewardDebt.toString());
-    const pending = accrued > debt ? accrued - debt : 0n;
-    return Number(pending) / 1e9;
+    const newlyAccrued = accrued > debt ? accrued - debt : 0n;
+    const banked = BigInt(positionData.unclaimedLamports.toString());
+    return Number(banked + newlyAccrued) / 1e9;
   }, [positionData, poolData]);
 
   const lockupRemainingSec = useMemo(() => {
-    if (!positionData || !poolData) return 0;
-    const unlockAt = Number(positionData.stakedAt) + poolData.stakeLockupSeconds;
-    return Math.max(0, unlockAt - Math.floor(Date.now() / 1000));
-  }, [positionData, poolData]);
+    if (!positionData) return 0;
+    return Math.max(0, Number(positionData.unlockAt) - Math.floor(Date.now() / 1000));
+  }, [positionData]);
+
+  const lockTiers: { durationSeconds: number; weightMultiplierBps: number }[] = poolData
+    ? poolData.lockTiers.slice(0, poolData.activeLockTierCount)
+    : [];
 
   const runTx = useCallback(
     async (fn: () => Promise<string>) => {
@@ -124,7 +124,7 @@ export function StakingPanel() {
       const stakerMineAta = getAssociatedTokenAddressSync(poolData.mineMint, wallet.publicKey!);
       const raw = new BN(Math.round(Number(amount) * 1e6));
       const sig = await program.methods
-        .stake(raw)
+        .stake(raw, lockTier)
         .accounts({
           staker: wallet.publicKey!,
           stakingPool: pool,
@@ -136,10 +136,37 @@ export function StakingPanel() {
           systemProgram: SystemProgram.programId,
         })
         .rpc();
-      setNotice(`Staked ${amount} $MINE`);
+      setNotice(`Locked ${amount} $MINE`);
       return sig;
     });
-  }, [program, wallet.publicKey, poolData, amount, runTx]);
+  }, [program, wallet.publicKey, poolData, amount, lockTier, runTx]);
+
+  const doBurnAndBoost = useCallback(() => {
+    if (!program || !wallet.publicKey || !poolData) return;
+    return runTx(async () => {
+      const [pool] = stakingPoolPda();
+      const [position] = stakePositionPda(wallet.publicKey!);
+      const [rewardVault] = rewardVaultPda();
+      const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
+      const stakerMineAta = getAssociatedTokenAddressSync(poolData.mineMint, wallet.publicKey!);
+      const raw = new BN(Math.round(Number(burnAmount) * 1e6));
+      const sig = await program.methods
+        .burnAndBoost(raw)
+        .accounts({
+          staker: wallet.publicKey!,
+          stakingPool: pool,
+          position,
+          rewardVault,
+          mineMint: poolData.mineMint,
+          stakerMineAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+      setNotice(`Permanently burned ${burnAmount} $MINE for a ${(poolData.burnWeightMultiplierBps / 10000).toFixed(1)}x weight boost`);
+      return sig;
+    });
+  }, [program, wallet.publicKey, poolData, burnAmount, runTx]);
 
   const doUnstake = useCallback(() => {
     if (!program || !wallet.publicKey || !poolData || !positionData) return;
@@ -152,7 +179,7 @@ export function StakingPanel() {
       const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
       const stakerMineAta = getAssociatedTokenAddressSync(poolData.mineMint, wallet.publicKey!);
       const sig = await program.methods
-        .unstake(positionData.stakedAmount)
+        .unstake()
         .accounts({
           staker: wallet.publicKey!,
           stakingPool: pool,
@@ -164,7 +191,7 @@ export function StakingPanel() {
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .rpc();
-      setNotice("Unstaked everything");
+      setNotice("Unlocked and withdrawn");
       return sig;
     });
   }, [program, wallet.publicKey, poolData, positionData, runTx]);
@@ -184,6 +211,9 @@ export function StakingPanel() {
     });
   }, [program, wallet.publicKey, runTx, pendingYield]);
 
+  const hasLock = positionData && Number(positionData.lockedAmount) > 0;
+  const hasBurned = positionData && BigInt(positionData.burnedWeight.toString()) > 0n;
+
   return (
     <div className="mines-app">
       <header>
@@ -197,9 +227,10 @@ export function StakingPanel() {
       </header>
 
       <p className="rules">
-        Stake $MINE to earn a pro-rata share of real XNT platform revenue — funded from Mines and Wykop house edge,
-        not from new token emission. Your yield rate isn't fixed or promised; it depends on total platform activity
-        and how many others are staking, split fairly among everyone currently staked.
+        Lock $MINE to earn a pro-rata share of real XNT platform revenue — auto-funded from a small skim off every
+        Mines/Wykop wager, not from new token emission. Longer locks earn a bigger share on the same tokens.
+        Permanently burning $MINE instead earns an even bigger share, forever — real supply reduction, not just a
+        temporary lock.
       </p>
 
       {!poolData && <p className="status-banner">Loading staking pool...</p>}
@@ -208,9 +239,9 @@ export function StakingPanel() {
         <>
           <div className="panel stake-stats">
             <div className="stake-stat">
-              <span className="stake-stat-label">Your stake</span>
+              <span className="stake-stat-label">Locked</span>
               <span className="stake-stat-value">
-                {positionData ? (Number(positionData.stakedAmount) / 1e6).toFixed(2) : "0.00"} $MINE
+                {positionData ? (Number(positionData.lockedAmount) / 1e6).toFixed(2) : "0.00"} $MINE
               </span>
             </div>
             <div className="stake-stat">
@@ -218,40 +249,89 @@ export function StakingPanel() {
               <span className="stake-stat-value gold">{pendingYield.toFixed(5)} XNT</span>
             </div>
             <div className="stake-stat">
-              <span className="stake-stat-label">Total staked (pool)</span>
-              <span className="stake-stat-value">{(Number(poolData.totalStaked) / 1e6).toFixed(2)} $MINE</span>
+              <span className="stake-stat-label">Total weight (pool)</span>
+              <span className="stake-stat-value">{(Number(poolData.totalWeight) / 1e6).toFixed(1)}</span>
             </div>
+          </div>
+
+          {hasBurned && (
+            <p className="status-banner status-cashed_out">
+              🔥 {(Number(positionData.burnedWeight) / 1e6).toFixed(2)} permanent weight from burned $MINE (never
+              expires, never returns)
+            </p>
+          )}
+
+          <div className="panel">
+            <div className="lock-tier-picker">
+              {lockTiers.map((tier, i) => (
+                <button
+                  key={i}
+                  className={`tier-option${lockTier === i ? " selected" : ""}`}
+                  onClick={() => setLockTier(i)}
+                  disabled={busy || hasLock}
+                >
+                  <span className="tier-duration">
+                    {tier.durationSeconds === 0 ? "No lock" : formatDuration(tier.durationSeconds)}
+                  </span>
+                  <span className="tier-price">{(tier.weightMultiplierBps / 10000).toFixed(1)}x weight</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="controls">
+              <label>
+                Amount ($MINE)
+                <input value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy || hasLock} />
+              </label>
+              <button onClick={doStake} disabled={busy || !program || !amount || hasLock}>
+                Lock
+              </button>
+            </div>
+            {hasLock && (
+              <p className="rules" style={{ marginTop: 8, marginBottom: 0 }}>
+                Already have an active lock — unlock it first to choose a different tier.
+              </p>
+            )}
           </div>
 
           <div className="panel">
             <div className="controls">
               <label>
-                Amount ($MINE)
-                <input value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy} />
+                Burn amount ($MINE)
+                <input value={burnAmount} onChange={(e) => setBurnAmount(e.target.value)} disabled={busy} />
               </label>
-              <button onClick={doStake} disabled={busy || !program || !amount}>
-                Stake
+              <button onClick={doBurnAndBoost} disabled={busy || !program || !burnAmount} className="burn-btn">
+                🔥 Burn for {(poolData.burnWeightMultiplierBps / 10000).toFixed(1)}x (permanent)
               </button>
             </div>
+          </div>
 
-            {positionData && Number(positionData.stakedAmount) > 0 && (
-              <div className="controls" style={{ marginTop: 14 }}>
+          {(hasLock || hasBurned) && (
+            <div className="panel">
+              <div className="controls">
                 <button onClick={doClaim} disabled={busy || pendingYield <= 0} className="cashout">
                   Claim {pendingYield.toFixed(5)} XNT
                 </button>
-                <button onClick={doUnstake} disabled={busy || lockupRemainingSec > 0}>
-                  {lockupRemainingSec > 0
-                    ? `Unstake (locked ${Math.ceil(lockupRemainingSec / 3600)}h)`
-                    : "Unstake all"}
-                </button>
+                {hasLock && (
+                  <button onClick={doUnstake} disabled={busy || lockupRemainingSec > 0}>
+                    {lockupRemainingSec > 0 ? `Locked ${formatDuration(lockupRemainingSec)}` : "Unlock all"}
+                  </button>
+                )}
               </div>
-            )}
+            </div>
+          )}
 
-            {notice && <p className="status-banner status-cashed_out">{notice}</p>}
-            {error && <p className="error-banner">{error}</p>}
-          </div>
+          {notice && <p className="status-banner status-cashed_out">{notice}</p>}
+          {error && <p className="error-banner">{error}</p>}
         </>
       )}
     </div>
   );
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.ceil(seconds / 3600)}h`;
+  return `${Math.ceil(seconds / 86400)}d`;
 }
