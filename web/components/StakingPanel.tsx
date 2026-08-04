@@ -130,7 +130,23 @@ export function StakingPanel() {
     return () => clearInterval(tick);
   }, []);
 
-  const accRewardPerWeight = poolData ? BigInt(poolData.accRewardPerWeight.toString()) : 0n;
+  // Mirrors settle_unallocated() exactly (lib.rs): unallocated_rewards only
+  // actually gets swept into acc_reward_per_weight the next time SOME
+  // staking instruction runs — until then, the raw on-chain value looks
+  // stale even though the real, would-be pending yield is already known.
+  // Projecting the sweep here client-side (a pure read, no tx) means the
+  // displayed number is correct immediately, instead of only becoming
+  // accurate after the player happens to trigger some other action first.
+  const accRewardPerWeight = useMemo(() => {
+    if (!poolData) return 0n;
+    const raw = BigInt(poolData.accRewardPerWeight.toString());
+    const unallocated = BigInt(poolData.unallocatedRewards.toString());
+    const totalWeight = BigInt(poolData.totalWeight.toString());
+    if (unallocated > 0n && totalWeight > 0n) {
+      return raw + (unallocated * ACC_REWARD_SCALE) / totalWeight;
+    }
+    return raw;
+  }, [poolData]);
   const totalPendingYield = useMemo(
     () => positions.reduce((sum, p) => sum + pendingYieldOf(p, accRewardPerWeight), 0),
     [positions, accRewardPerWeight],
@@ -219,49 +235,77 @@ export function StakingPanel() {
     });
   }, [program, wallet.publicKey, poolData, burnAmount, burnTier, burnTiers, runTx]);
 
-  const doExpire = useCallback(
-    (pos: PositionRow) => {
-      if (!program || !wallet.publicKey || !poolData) return;
-      return runTx(async () => {
-        const [pool] = stakingPoolPda();
-        const [stakeTokenVault] = stakeTokenVaultPda();
-        const [stakingAuthority] = stakingAuthorityPda();
-        const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
-        const ownerMineAta = getAssociatedTokenAddressSync(poolData.mineMint, wallet.publicKey!);
-        const sig = await program.methods
-          .expirePosition()
-          .accounts({
-            payer: wallet.publicKey!,
-            stakingPool: pool,
-            position: pos.publicKey,
-            stakeTokenVault,
-            stakingAuthority,
-            ownerMineAta,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .rpc();
-        setNotice(pos.kind === "lock" ? "Withdrawn" : "Weight removed");
-        return sig;
-      });
+  const claimYieldTx = useCallback(
+    async (pos: PositionRow) => {
+      const [pool] = stakingPoolPda();
+      const [rewardVault] = rewardVaultPda();
+      return program!.methods
+        .claimYield(new BN(pos.positionId.toString()))
+        .accounts({ staker: wallet.publicKey!, stakingPool: pool, position: pos.publicKey, rewardVault })
+        .rpc();
     },
-    [program, wallet.publicKey, poolData, runTx],
+    [program, wallet.publicKey],
   );
 
   const doClaim = useCallback(
     (pos: PositionRow) => {
       if (!program || !wallet.publicKey) return;
       return runTx(async () => {
-        const [pool] = stakingPoolPda();
-        const [rewardVault] = rewardVaultPda();
-        const sig = await program.methods
-          .claimYield(new BN(pos.positionId.toString()))
-          .accounts({ staker: wallet.publicKey!, stakingPool: pool, position: pos.publicKey, rewardVault })
-          .rpc();
+        const sig = await claimYieldTx(pos);
         setNotice(`Claimed ${pendingYieldOf(pos, accRewardPerWeight).toFixed(5)} XNT`);
         return sig;
       });
     },
-    [program, wallet.publicKey, runTx, accRewardPerWeight],
+    [program, wallet.publicKey, runTx, accRewardPerWeight, claimYieldTx],
+  );
+
+  // Withdraw ($MINE principal, Lock only) and Claim (XNT yield) are two
+  // separate on-chain instructions (expire_position does a token CPI and
+  // can't also move lamports in the same call — see the note on
+  // claim_yield in lib.rs), but there's no reason a player should have to
+  // click twice at the end of a lock. This fires both, back to back,
+  // behind a single button.
+  const doClaimAll = useCallback(
+    (pos: PositionRow) => {
+      if (!program || !wallet.publicKey || !poolData) return;
+      return runTx(async () => {
+        const pendingBefore = pendingYieldOf(pos, accRewardPerWeight);
+        const [pool] = stakingPoolPda();
+        const [stakeTokenVault] = stakeTokenVaultPda();
+        const [stakingAuthority] = stakingAuthorityPda();
+        const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
+        const ownerMineAta = getAssociatedTokenAddressSync(poolData.mineMint, wallet.publicKey!);
+        try {
+          await program.methods
+            .expirePosition()
+            .accounts({
+              payer: wallet.publicKey!,
+              stakingPool: pool,
+              position: pos.publicKey,
+              stakeTokenVault,
+              stakingAuthority,
+              ownerMineAta,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc();
+        } catch (err: any) {
+          // See doExpire — the background keeper may have already reaped
+          // this one; that's fine, the $MINE is already back either way.
+          if (!String(err.message ?? err).includes("AlreadyExpired")) throw err;
+        }
+        let sig = "";
+        if (pendingBefore > 0) {
+          sig = await claimYieldTx(pos);
+        }
+        setNotice(
+          pendingBefore > 0
+            ? `Withdrawn ${(Number(pos.amount) / 1e6).toFixed(2)} $MINE + claimed ${pendingBefore.toFixed(5)} XNT`
+            : `Withdrawn ${(Number(pos.amount) / 1e6).toFixed(2)} $MINE`,
+        );
+        return sig;
+      });
+    },
+    [program, wallet.publicKey, poolData, runTx, accRewardPerWeight, claimYieldTx],
   );
 
   return (
@@ -407,15 +451,22 @@ export function StakingPanel() {
                       </span>
                       <span className="position-pending">{pending > 0 ? `${pending.toFixed(5)} XNT` : ""}</span>
                       <span className="position-actions">
-                        {pending > 0 && (
-                          <button onClick={() => doClaim(pos)} disabled={busy} className="cashout">
-                            Claim
+                        {!pos.expired && remaining === 0 ? (
+                          <button onClick={() => doClaimAll(pos)} disabled={busy} className="cashout">
+                            {pending > 0
+                              ? pos.kind === "lock"
+                                ? "Withdraw + Claim"
+                                : "Reap + Claim"
+                              : pos.kind === "lock"
+                                ? "Withdraw"
+                                : "Reap now"}
                           </button>
-                        )}
-                        {!pos.expired && remaining === 0 && (
-                          <button onClick={() => doExpire(pos)} disabled={busy}>
-                            {pos.kind === "lock" ? "Withdraw" : "Reap now"}
-                          </button>
+                        ) : (
+                          pending > 0 && (
+                            <button onClick={() => doClaim(pos)} disabled={busy} className="cashout">
+                              Claim
+                            </button>
+                          )
                         )}
                       </span>
                     </div>
