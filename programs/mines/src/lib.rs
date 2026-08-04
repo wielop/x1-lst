@@ -133,6 +133,24 @@ pub const MINE_DECIMALS_SCALE: u128 = 1_000_000;
 /// house edge leaving room for the rest to be genuine house margin.
 pub const FLOOR_TARGET_BPS: u128 = 7_000;
 
+/// Wykop's incoming XNT is unlike Mines' — resolve_dig never draws XNT
+/// back out of the shared vault (it only ever mints $MINE), so unlike
+/// Mines' wager, 100% of a dig's payment is unencumbered revenue with no
+/// payout obligation behind it. Confirmed split with the user
+/// (2026-08-04): staking gets the biggest share (it needs to be a
+/// genuinely attractive reason to hold $MINE), buyback+burn and the
+/// liquidity pool split the rest evenly (both are direct, automatic
+/// counterweights to the fact that Wykop is constantly minting new
+/// supply), and only a small remainder still supports Mines' shared
+/// bankroll — a "thanks for existing in the same ecosystem" contribution,
+/// not a subsidy Wykop owes Mines. See route_wykop_wager.
+pub const WYKOP_STAKING_BPS: u64 = 4_000; // 40%
+pub const WYKOP_BUYBACK_BPS: u64 = 2_500; // 25%
+pub const WYKOP_LIQUIDITY_BPS: u64 = 2_500; // 25%
+// Remainder (10%) goes to the shared vault — not a named constant since
+// it's whatever's left after the other three, avoiding any rounding dust
+// getting silently dropped.
+
 #[program]
 pub mod mines {
     use super::*;
@@ -593,22 +611,24 @@ pub mod mines {
         let dig_config = &mut ctx.accounts.dig_config;
         let price = dig_config.tier_prices[duration_tier as usize];
 
-        let skim = route_wager_skim(
+        // Wykop's whole wager is unencumbered revenue (resolve_dig never
+        // draws XNT back out) — see route_wykop_wager / WYKOP_*_BPS for the
+        // confirmed 40% staking / 25% buyback+burn / 25% liquidity / 10%
+        // vault split, very different from Mines' route_wager_skim.
+        route_wykop_wager(
             price,
             &ctx.accounts.player.to_account_info(),
-            &ctx.accounts.reward_vault.to_account_info(),
             &ctx.accounts.system_program.to_account_info(),
+            &ctx.accounts.reward_vault.to_account_info(),
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.pool_xnt_vault.to_account_info(),
+            &ctx.accounts.pool_mine_vault.to_account_info(),
+            ctx.accounts.pool_mine_vault.amount,
+            &ctx.accounts.mine_mint.to_account_info(),
+            &ctx.accounts.pool_authority.to_account_info(),
+            ctx.accounts.liquidity_pool.pool_authority_bump,
+            &ctx.accounts.token_program.to_account_info(),
             &mut ctx.accounts.staking_pool,
-        )?;
-        let to_vault = price.checked_sub(skim).ok_or(MinesError::MathOverflow)?;
-
-        invoke(
-            &system_instruction::transfer(&ctx.accounts.player.key(), &ctx.accounts.vault.key(), to_vault),
-            &[
-                ctx.accounts.player.to_account_info(),
-                ctx.accounts.vault.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
         )?;
 
         config.cumulative_volume = config.cumulative_volume.saturating_add(price);
@@ -1442,6 +1462,23 @@ pub struct StartDig<'info> {
 
     #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
     pub reward_vault: Box<Account<'info, RewardVault>>,
+
+    // Needed for route_wykop_wager's automatic buyback-and-burn + liquidity
+    // top-up — required, not optional, same as ResolveDig's pool accounts
+    // (this program's operator seeds the liquidity pool immediately after
+    // deploying, before any dig can be started).
+    #[account(mut, seeds = [POOL_XNT_VAULT_SEED], bump = liquidity_pool.xnt_vault_bump)]
+    pub pool_xnt_vault: Box<Account<'info, Vault>>,
+
+    #[account(mut, address = liquidity_pool.mine_vault)]
+    pub pool_mine_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(seeds = [LIQUIDITY_POOL_SEED], bump = liquidity_pool.bump)]
+    pub liquidity_pool: Box<Account<'info, LiquidityPool>>,
+
+    /// CHECK: signer-only PDA, see InitializeLiquidityPool.
+    #[account(seeds = [POOL_AUTHORITY_SEED], bump = liquidity_pool.pool_authority_bump)]
+    pub pool_authority: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -2357,9 +2394,10 @@ fn settle_unallocated(pool: &mut Account<StakingPool>) -> Result<()> {
     Ok(())
 }
 
-/// Called from `start_round`/`start_dig`: skims `pool.skim_bps` of the
-/// wager straight out of the incoming payment (before it even reaches the
-/// main game vault) into the staking reward vault, and routes it into the
+/// Called from `start_round` (Mines only — see `route_wykop_wager` for
+/// Wykop's very different split): skims `pool.skim_bps` of the wager
+/// straight out of the incoming payment (before it even reaches the main
+/// game vault) into the staking reward vault, and routes it into the
 /// accumulator immediately if there's weight to attribute it to yet.
 /// Returns the skim amount actually taken, so the caller knows how much
 /// less reaches the main vault.
@@ -2389,6 +2427,124 @@ fn route_wager_skim<'info>(
     }
     emit!(WagerSkimRouted { amount: skim, allocated: pool.total_weight > 0 });
     Ok(skim)
+}
+
+/// Wykop-only wager split — see the comment on WYKOP_STAKING_BPS for why
+/// this looks nothing like Mines' route_wager_skim. resolve_dig never
+/// draws XNT back out of the shared vault (it only ever mints $MINE), so
+/// unlike Mines' wager, the whole thing is unencumbered revenue with no
+/// payout obligation behind it — split four ways: staking (biggest share,
+/// meant to make holding/locking $MINE genuinely worthwhile), an
+/// automatic buyback-and-burn swap (so deflation is a guaranteed side
+/// effect of playing, not a manual admin task someone has to remember to
+/// run), a straight top-up of the liquidity pool's XNT reserve (directly
+/// deepens what Wykop's own price-aware floor depends on), and whatever's
+/// left to the shared vault (a small ecosystem-health contribution, not a
+/// subsidy Wykop owes Mines). Confirmed split with the user 2026-08-04.
+fn route_wykop_wager<'info>(
+    wager: u64,
+    player: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    reward_vault: &AccountInfo<'info>,
+    vault: &AccountInfo<'info>,
+    pool_xnt_vault: &AccountInfo<'info>,
+    pool_mine_vault: &AccountInfo<'info>,
+    pool_mine_vault_amount: u64,
+    mine_mint: &AccountInfo<'info>,
+    pool_authority: &AccountInfo<'info>,
+    pool_authority_bump: u8,
+    token_program: &AccountInfo<'info>,
+    staking_pool: &mut Account<'info, StakingPool>,
+) -> Result<()> {
+    let staking_amt: u64 = (wager as u128)
+        .checked_mul(WYKOP_STAKING_BPS as u128).ok_or(MinesError::MathOverflow)?
+        .checked_div(10_000).ok_or(MinesError::MathOverflow)?
+        .try_into().map_err(|_| MinesError::MathOverflow)?;
+    let buyback_amt: u64 = (wager as u128)
+        .checked_mul(WYKOP_BUYBACK_BPS as u128).ok_or(MinesError::MathOverflow)?
+        .checked_div(10_000).ok_or(MinesError::MathOverflow)?
+        .try_into().map_err(|_| MinesError::MathOverflow)?;
+    let liquidity_amt: u64 = (wager as u128)
+        .checked_mul(WYKOP_LIQUIDITY_BPS as u128).ok_or(MinesError::MathOverflow)?
+        .checked_div(10_000).ok_or(MinesError::MathOverflow)?
+        .try_into().map_err(|_| MinesError::MathOverflow)?;
+    // Remainder, not a fourth percentage of its own — avoids rounding
+    // dust from three separate bps divisions silently vanishing.
+    let vault_amt = wager
+        .checked_sub(staking_amt).ok_or(MinesError::MathOverflow)?
+        .checked_sub(buyback_amt).ok_or(MinesError::MathOverflow)?
+        .checked_sub(liquidity_amt).ok_or(MinesError::MathOverflow)?;
+
+    // --- staking: identical accumulator-routing logic to route_wager_skim ---
+    if staking_amt > 0 {
+        invoke(
+            &system_instruction::transfer(player.key, reward_vault.key, staking_amt),
+            &[player.clone(), reward_vault.clone(), system_program.clone()],
+        )?;
+        if staking_pool.total_weight > 0 {
+            let delta = (staking_amt as u128).checked_mul(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow)?
+                .checked_div(staking_pool.total_weight).ok_or(MinesError::MathOverflow)?;
+            staking_pool.acc_reward_per_weight =
+                staking_pool.acc_reward_per_weight.checked_add(delta).ok_or(MinesError::MathOverflow)?;
+        } else {
+            staking_pool.unallocated_rewards =
+                staking_pool.unallocated_rewards.checked_add(staking_amt).ok_or(MinesError::MathOverflow)?;
+        }
+        emit!(WagerSkimRouted { amount: staking_amt, allocated: staking_pool.total_weight > 0 });
+    }
+
+    // --- automatic buyback & burn, priced off reserves as they stand right
+    // now (before this same call's liquidity top-up below lands) — same
+    // quoting/guard logic as the manual buyback_and_burn instruction. Falls
+    // back to a plain liquidity deposit if the pool can't be safely quoted
+    // right now, so this slice of the wager is never silently dropped. ---
+    if buyback_amt > 0 {
+        let reserve_xnt = pool_xnt_vault.lamports();
+        let mine_out = if reserve_xnt > 0 && pool_mine_vault_amount > 0 {
+            constant_product_out(buyback_amt, reserve_xnt, pool_mine_vault_amount).unwrap_or(0)
+        } else {
+            0
+        };
+        invoke(
+            &system_instruction::transfer(player.key, pool_xnt_vault.key, buyback_amt),
+            &[player.clone(), pool_xnt_vault.clone(), system_program.clone()],
+        )?;
+        if mine_out > 0 && mine_out < pool_mine_vault_amount {
+            let seeds: &[&[u8]] = &[POOL_AUTHORITY_SEED, &[pool_authority_bump]];
+            let signer = &[seeds];
+            token::burn(
+                CpiContext::new_with_signer(
+                    token_program.clone(),
+                    token::Burn {
+                        mint: mine_mint.clone(),
+                        from: pool_mine_vault.clone(),
+                        authority: pool_authority.clone(),
+                    },
+                    signer,
+                ),
+                mine_out,
+            )?;
+            emit!(BuybackAndBurned { xnt_amount: buyback_amt, mine_burned: mine_out });
+        }
+    }
+
+    // --- straight liquidity top-up, no swap ---
+    if liquidity_amt > 0 {
+        invoke(
+            &system_instruction::transfer(player.key, pool_xnt_vault.key, liquidity_amt),
+            &[player.clone(), pool_xnt_vault.clone(), system_program.clone()],
+        )?;
+    }
+
+    // --- remainder to the shared vault ---
+    if vault_amt > 0 {
+        invoke(
+            &system_instruction::transfer(player.key, vault.key, vault_amt),
+            &[player.clone(), vault.clone(), system_program.clone()],
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Both `reward_vault` and the recipient are plain system accounts (or a

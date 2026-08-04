@@ -16,6 +16,8 @@ import {
   rewardVaultPda,
   poolXntVaultPda,
   poolMineVaultPda,
+  liquidityPoolPda,
+  poolAuthorityPda,
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
@@ -251,6 +253,10 @@ export function WykopGame() {
       const [vault] = vaultPda();
       const [stakingPool] = stakingPoolPda();
       const [rewardVault] = rewardVaultPda();
+      const [liquidityPool] = liquidityPoolPda();
+      const [poolXntVault] = poolXntVaultPda();
+      const [poolMineVault] = poolMineVaultPda();
+      const [poolAuthority] = poolAuthorityPda();
       const newSessionId: bigint = BigInt(digConfigData.totalSessions.toString());
       const [session] = digSessionPda(newSessionId);
       const clientSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)));
@@ -272,6 +278,10 @@ export function WykopGame() {
           playerMineAta,
           stakingPool,
           rewardVault,
+          poolXntVault,
+          poolMineVault,
+          liquidityPool,
+          poolAuthority,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,

@@ -684,6 +684,26 @@
           "isSigner": false
         },
         {
+          "name": "poolXntVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "liquidityPool",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "poolAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
           "name": "tokenProgram",
           "isMut": false,
           "isSigner": false
