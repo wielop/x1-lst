@@ -76,6 +76,13 @@ pub const RARITY_NONE: u8 = 0xFF;
 /// Fixed-point scale for the staking reward accumulator (Phase B).
 pub const ACC_REWARD_SCALE: u128 = 1_000_000_000_000;
 
+// --- $MINE staking (Phase B) ---
+pub const STAKING_POOL_SEED: &[u8] = b"staking_pool";
+pub const STAKE_POSITION_SEED: &[u8] = b"stake_position";
+pub const STAKE_TOKEN_VAULT_SEED: &[u8] = b"stake_token_vault";
+pub const STAKING_AUTHORITY_SEED: &[u8] = b"staking_authority";
+pub const REWARD_VAULT_SEED: &[u8] = b"reward_vault";
+
 #[program]
 pub mod mines {
     use super::*;
@@ -321,9 +328,16 @@ pub mod mines {
                 .checked_div(EMISSION_SCALE)
                 .ok_or(MinesError::MathOverflow)?;
 
+            // rakeback_pool is retired (was a stub with no defined
+            // redemption mechanism since launch — see StakingPool below,
+            // which is what it always should have plugged into). Its old
+            // 10% share is folded into leaderboard_pool. The account is
+            // still passed through CashOut's context for layout/instruction
+            // compatibility with what's already live, it just never
+            // receives a mint anymore.
             player_mint = (total_emission * 70 / 100) as u64;
-            leaderboard_mint = (total_emission * 20 / 100) as u64;
-            rakeback_mint = (total_emission - (total_emission * 70 / 100) - (total_emission * 20 / 100)) as u64;
+            leaderboard_mint = (total_emission - (total_emission * 70 / 100)) as u64;
+            rakeback_mint = 0u64;
 
             let seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[config.mint_authority_bump]];
             let signer = &[seeds];
@@ -634,6 +648,169 @@ pub mod mines {
         });
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // $MINE staking — real XNT yield, funded from platform revenue
+    // (`fund_staking_rewards`, admin/treasury-operated), not from token
+    // emission. Rewards are a pro-rata share of whatever XNT actually
+    // arrived (Synthetix/MasterChef accumulator pattern) — deliberately
+    // *not* a fixed or promised rate. A fixed floor-token payout combined
+    // with a fixed yield rate would be a risk-free arbitrage (buy the
+    // floor, stake it, yield more than you paid); making the return
+    // genuinely unknowable in advance and dependent on total participation
+    // closes that off without needing a $MINE/XNT price oracle at all.
+    // -----------------------------------------------------------------
+
+    pub fn initialize_staking_pool(ctx: Context<InitializeStakingPool>, stake_lockup_seconds: u32) -> Result<()> {
+        let pool = &mut ctx.accounts.staking_pool;
+        pool.admin = ctx.accounts.admin.key();
+        pool.mine_mint = ctx.accounts.config.mine_mint;
+        pool.stake_token_vault = ctx.accounts.stake_token_vault.key();
+        pool.total_staked = 0;
+        pool.acc_reward_per_share = 0;
+        pool.stake_lockup_seconds = stake_lockup_seconds;
+        pool.bump = ctx.bumps["staking_pool"];
+        pool.reward_vault_bump = ctx.bumps["reward_vault"];
+        pool.staking_authority_bump = ctx.bumps["staking_authority"];
+        ctx.accounts.reward_vault.bump = ctx.bumps["reward_vault"];
+
+        emit!(StakingPoolInitialized { stake_lockup_seconds });
+        Ok(())
+    }
+
+    pub fn stake(ctx: Context<Stake>, amount: u64) -> Result<()> {
+        require!(amount > 0, MinesError::InvalidParam);
+
+        let pool = &mut ctx.accounts.staking_pool;
+        let position = &mut ctx.accounts.position;
+
+        if position.staked_amount > 0 {
+            let pending = pending_reward(position.staked_amount, pool.acc_reward_per_share, position.reward_debt)?;
+            if pending > 0 {
+                pay_from_reward_vault(
+                    &ctx.accounts.reward_vault.to_account_info(),
+                    &ctx.accounts.staker.to_account_info(),
+                    pending,
+                )?;
+            }
+        } else {
+            position.owner = ctx.accounts.staker.key();
+            position.bump = ctx.bumps["position"];
+        }
+
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.staker_mine_ata.to_account_info(),
+                    to: ctx.accounts.stake_token_vault.to_account_info(),
+                    authority: ctx.accounts.staker.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        pool.total_staked = pool.total_staked.checked_add(amount).ok_or(MinesError::MathOverflow)?;
+        position.staked_amount = position.staked_amount.checked_add(amount).ok_or(MinesError::MathOverflow)?;
+        position.reward_debt = (position.staked_amount as u128)
+            .checked_mul(pool.acc_reward_per_share)
+            .ok_or(MinesError::MathOverflow)?
+            .checked_div(ACC_REWARD_SCALE)
+            .ok_or(MinesError::MathOverflow)?;
+        // Resets on every top-up, not just the first stake — otherwise
+        // topping up by a trivial amount would be a way to dodge most of
+        // the lockup on a much larger pre-existing position.
+        position.staked_at = Clock::get()?.unix_timestamp;
+
+        emit!(Staked { owner: position.owner, amount, total_staked: position.staked_amount });
+        Ok(())
+    }
+
+    pub fn unstake(ctx: Context<Unstake>, amount: u64) -> Result<()> {
+        let pool = &mut ctx.accounts.staking_pool;
+        let position = &mut ctx.accounts.position;
+
+        require!(amount > 0 && amount <= position.staked_amount, MinesError::InvalidParam);
+        let elapsed = Clock::get()?.unix_timestamp - position.staked_at;
+        require!(elapsed >= pool.stake_lockup_seconds as i64, MinesError::StakeLocked);
+
+        let pending = pending_reward(position.staked_amount, pool.acc_reward_per_share, position.reward_debt)?;
+        if pending > 0 {
+            pay_from_reward_vault(
+                &ctx.accounts.reward_vault.to_account_info(),
+                &ctx.accounts.staker.to_account_info(),
+                pending,
+            )?;
+        }
+
+        let seeds: &[&[u8]] = &[STAKING_AUTHORITY_SEED, &[pool.staking_authority_bump]];
+        let signer = &[seeds];
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.stake_token_vault.to_account_info(),
+                    to: ctx.accounts.staker_mine_ata.to_account_info(),
+                    authority: ctx.accounts.staking_authority.to_account_info(),
+                },
+                signer,
+            ),
+            amount,
+        )?;
+
+        pool.total_staked = pool.total_staked.checked_sub(amount).ok_or(MinesError::MathOverflow)?;
+        position.staked_amount = position.staked_amount.checked_sub(amount).ok_or(MinesError::MathOverflow)?;
+        position.reward_debt = (position.staked_amount as u128)
+            .checked_mul(pool.acc_reward_per_share)
+            .ok_or(MinesError::MathOverflow)?
+            .checked_div(ACC_REWARD_SCALE)
+            .ok_or(MinesError::MathOverflow)?;
+
+        emit!(Unstaked { owner: position.owner, amount, total_staked: position.staked_amount });
+        Ok(())
+    }
+
+    pub fn claim_yield(ctx: Context<ClaimYield>) -> Result<()> {
+        let pool = &ctx.accounts.staking_pool;
+        let position = &mut ctx.accounts.position;
+
+        let pending = pending_reward(position.staked_amount, pool.acc_reward_per_share, position.reward_debt)?;
+        require!(pending > 0, MinesError::NothingToCashOut);
+
+        pay_from_reward_vault(&ctx.accounts.reward_vault.to_account_info(), &ctx.accounts.staker.to_account_info(), pending)?;
+
+        position.reward_debt = (position.staked_amount as u128)
+            .checked_mul(pool.acc_reward_per_share)
+            .ok_or(MinesError::MathOverflow)?
+            .checked_div(ACC_REWARD_SCALE)
+            .ok_or(MinesError::MathOverflow)?;
+
+        emit!(YieldClaimed { owner: position.owner, amount: pending });
+        Ok(())
+    }
+
+    /// Admin/treasury-operated: moves accumulated house revenue that's
+    /// otherwise just sitting in the shared `vault` into the staking reward
+    /// pool, and bumps the accumulator so existing stakers can claim their
+    /// pro-rata share. Requires at least one staker — funding with zero
+    /// stakers would permanently strand the lamports (no one's
+    /// `acc_reward_per_share` delta could ever account for them).
+    pub fn fund_staking_rewards(ctx: Context<FundStakingRewards>, amount: u64) -> Result<()> {
+        require!(amount > 0, MinesError::InvalidParam);
+        let pool = &mut ctx.accounts.staking_pool;
+        require!(pool.total_staked > 0, MinesError::NoStakers);
+        require!(ctx.accounts.vault.to_account_info().lamports() >= amount, MinesError::InsufficientBankroll);
+
+        **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.reward_vault.to_account_info().try_borrow_mut_lamports()? += amount;
+
+        let delta = (amount as u128).checked_mul(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow)?
+            .checked_div(pool.total_staked as u128).ok_or(MinesError::MathOverflow)?;
+        pool.acc_reward_per_share = pool.acc_reward_per_share.checked_add(delta).ok_or(MinesError::MathOverflow)?;
+
+        emit!(StakingRewardsFunded { amount, new_acc_reward_per_share: pool.acc_reward_per_share });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +1106,132 @@ pub struct ResolveDig<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct InitializeStakingPool<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(init, payer = admin, space = StakingPool::LEN, seeds = [STAKING_POOL_SEED], bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    /// CHECK: signer-only PDA authorizing $MINE transfers out of
+    /// stake_token_vault on unstake.
+    #[account(seeds = [STAKING_AUTHORITY_SEED], bump)]
+    pub staking_authority: UncheckedAccount<'info>,
+
+    #[account(init, payer = admin, space = RewardVault::LEN, seeds = [REWARD_VAULT_SEED], bump)]
+    pub reward_vault: Box<Account<'info, RewardVault>>,
+
+    #[account(address = config.mine_mint)]
+    pub mine_mint: Box<Account<'info, Mint>>,
+
+    #[account(
+        init,
+        payer = admin,
+        token::mint = mine_mint,
+        token::authority = staking_authority,
+        seeds = [STAKE_TOKEN_VAULT_SEED],
+        bump
+    )]
+    pub stake_token_vault: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Stake<'info> {
+    #[account(mut)]
+    pub staker: Signer<'info>,
+
+    #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    #[account(
+        init_if_needed,
+        payer = staker,
+        space = StakePosition::LEN,
+        seeds = [STAKE_POSITION_SEED, staker.key().as_ref()],
+        bump
+    )]
+    pub position: Box<Account<'info, StakePosition>>,
+
+    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
+    pub reward_vault: Box<Account<'info, RewardVault>>,
+
+    #[account(mut, address = staking_pool.stake_token_vault)]
+    pub stake_token_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = staker)]
+    pub staker_mine_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Unstake<'info> {
+    #[account(mut)]
+    pub staker: Signer<'info>,
+
+    #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    #[account(mut, seeds = [STAKE_POSITION_SEED, staker.key().as_ref()], bump = position.bump)]
+    pub position: Box<Account<'info, StakePosition>>,
+
+    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
+    pub reward_vault: Box<Account<'info, RewardVault>>,
+
+    #[account(mut, address = staking_pool.stake_token_vault)]
+    pub stake_token_vault: Box<Account<'info, TokenAccount>>,
+
+    /// CHECK: signer-only PDA, see InitializeStakingPool.
+    #[account(seeds = [STAKING_AUTHORITY_SEED], bump = staking_pool.staking_authority_bump)]
+    pub staking_authority: UncheckedAccount<'info>,
+
+    #[account(mut, associated_token::mint = staking_pool.mine_mint, associated_token::authority = staker)]
+    pub staker_mine_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimYield<'info> {
+    #[account(mut)]
+    pub staker: Signer<'info>,
+
+    #[account(seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    #[account(mut, seeds = [STAKE_POSITION_SEED, staker.key().as_ref()], bump = position.bump)]
+    pub position: Box<Account<'info, StakePosition>>,
+
+    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
+    pub reward_vault: Box<Account<'info, RewardVault>>,
+}
+
+#[derive(Accounts)]
+pub struct FundStakingRewards<'info> {
+    #[account(mut)]
+    pub treasury_authority: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = treasury_authority)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(mut, seeds = [VAULT_SEED], bump = config.vault_bump)]
+    pub vault: Box<Account<'info, Vault>>,
+
+    #[account(mut, seeds = [STAKING_POOL_SEED], bump = staking_pool.bump)]
+    pub staking_pool: Box<Account<'info, StakingPool>>,
+
+    #[account(mut, seeds = [REWARD_VAULT_SEED], bump = staking_pool.reward_vault_bump)]
+    pub reward_vault: Box<Account<'info, RewardVault>>,
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -1057,6 +1360,48 @@ pub struct DigSession {
 
 impl DigSession {
     pub const LEN: usize = 8 + 32 + 8 + 1 + 8 + 8 + 32 + 32 + 1 + 1 + 1;
+}
+
+#[account]
+pub struct StakingPool {
+    pub admin: Pubkey,
+    pub mine_mint: Pubkey,
+    pub stake_token_vault: Pubkey,
+    pub total_staked: u64,
+    pub acc_reward_per_share: u128,
+    pub stake_lockup_seconds: u32,
+    pub bump: u8,
+    pub reward_vault_bump: u8,
+    pub staking_authority_bump: u8,
+}
+
+impl StakingPool {
+    pub const LEN: usize = 8 + 32 * 3 + 8 + 16 + 4 + 1 + 1 + 1;
+}
+
+#[account]
+pub struct StakePosition {
+    pub owner: Pubkey,
+    pub staked_amount: u64,
+    pub reward_debt: u128,
+    pub staked_at: i64,
+    pub bump: u8,
+}
+
+impl StakePosition {
+    pub const LEN: usize = 8 + 32 + 8 + 16 + 8 + 1;
+}
+
+/// Program-owned lamport holder for the XNT staking reward pool — same
+/// reasoning as `Vault`: must be program-owned, not a bare System account,
+/// so `pay_from_reward_vault` can debit it via direct pointer arithmetic.
+#[account]
+pub struct RewardVault {
+    pub bump: u8,
+}
+
+impl RewardVault {
+    pub const LEN: usize = 8 + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1536,37 @@ pub struct DigResolved {
     pub bonus_amount: u64,
 }
 
+#[event]
+pub struct StakingPoolInitialized {
+    pub stake_lockup_seconds: u32,
+}
+
+#[event]
+pub struct Staked {
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub total_staked: u64,
+}
+
+#[event]
+pub struct Unstaked {
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub total_staked: u64,
+}
+
+#[event]
+pub struct YieldClaimed {
+    pub owner: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct StakingRewardsFunded {
+    pub amount: u64,
+    pub new_acc_reward_per_share: u128,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -1223,6 +1599,10 @@ pub enum MinesError {
     InsufficientBankroll,
     #[msg("dig session's duration has not elapsed yet")]
     DigNotFinished,
+    #[msg("stake is still within its lockup period")]
+    StakeLocked,
+    #[msg("cannot fund staking rewards with zero stakers")]
+    NoStakers,
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,4 +1633,23 @@ fn emission_rate_scaled(cumulative_volume: u64) -> u128 {
         }
     }
     VOLUME_THRESHOLDS[VOLUME_THRESHOLDS.len() - 1].1
+}
+
+/// Standard MasterChef/Synthetix accumulator-pattern pending-reward calc.
+fn pending_reward(staked_amount: u64, acc_reward_per_share: u128, reward_debt: u128) -> Result<u64> {
+    let accrued = (staked_amount as u128)
+        .checked_mul(acc_reward_per_share)
+        .ok_or(MinesError::MathOverflow)?
+        .checked_div(ACC_REWARD_SCALE)
+        .ok_or(MinesError::MathOverflow)?;
+    Ok(accrued.saturating_sub(reward_debt).try_into().unwrap_or(u64::MAX))
+}
+
+/// Both `reward_vault` and the recipient are plain system accounts (or a
+/// program-owned lamport holder in the vault's case) — direct pointer
+/// arithmetic works the same way it does for the main game vault.
+fn pay_from_reward_vault(reward_vault: &AccountInfo, recipient: &AccountInfo, amount: u64) -> Result<()> {
+    **reward_vault.try_borrow_mut_lamports()? -= amount;
+    **recipient.try_borrow_mut_lamports()? += amount;
+    Ok(())
 }
