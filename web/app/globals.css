@@ -790,6 +790,15 @@ header h1::before {
   animation-duration: 1.1s;
 }
 
+.pickaxe.struck {
+  animation: none;
+  transform: rotate(18deg);
+}
+
+.mine-rock.struck {
+  filter: drop-shadow(0 0 26px rgba(251, 191, 36, 0.75));
+}
+
 .mine-scene.charging .mine-rock {
   animation: rockCharge 1.1s ease-in-out infinite;
 }

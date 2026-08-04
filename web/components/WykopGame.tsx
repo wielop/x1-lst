@@ -332,11 +332,13 @@ export function WykopGame() {
             // Play the reveal (flash/gem/+amount) as one last big strike in
             // the mine scene itself, instead of jumping straight to a flat
             // end screen — this is the actual win moment, so it needs to
-            // happen where the player is looking, not after it.
+            // happen where the player is looking, not after it. The actual
+            // "revealing" -> "done" delay is handled by a separate effect
+            // below, NOT here — setting status here would otherwise retrigger
+            // this effect's own cleanup (status is a dependency), flipping
+            // `cancelled` to true and permanently stranding the UI in
+            // "revealing" before it ever reaches "done".
             setStatus("revealing");
-            await new Promise((r) => setTimeout(r, 2300));
-            if (cancelled) return;
-            setStatus("done");
             return;
           }
         }
@@ -351,6 +353,16 @@ export function WykopGame() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, sessionId]);
+
+  // Holds the win reveal on screen for a beat before settling into the
+  // plain "done" summary. Deliberately its own effect, independent of the
+  // resolving-poll effect above, so it can't be cancelled by that effect's
+  // own cleanup when status changes.
+  useEffect(() => {
+    if (status !== "revealing") return;
+    const t = setTimeout(() => setStatus("done"), 2300);
+    return () => clearTimeout(t);
+  }, [status]);
 
   const rarityTiers: RarityInfo[] = digConfigData
     ? digConfigData.rarityTiers.slice(0, digConfigData.activeRarityCount)
@@ -428,23 +440,20 @@ export function WykopGame() {
               ))}
             </div>
 
-            {status !== "revealing" && (
-              <>
-                <span className={`mine-rock hit`} key={strikeKey}>
-                  🪨
+            {/* Rock + pickaxe stay mounted straight through the reveal —
+                the win bursts out of the same scene the player has been
+                watching the whole time, instead of the scene vanishing and
+                being replaced by a disconnected static result card. */}
+            <span className={`mine-rock hit${status === "revealing" ? " struck" : ""}`} key={strikeKey}>
+              🪨
+            </span>
+            <span className={`pickaxe${status === "revealing" ? " struck" : ""}`}>⛏️</span>
+            {status !== "revealing" &&
+              popups.map((p) => (
+                <span key={p.id} className="strike-popup" style={{ left: `${30 + Math.random() * 40}%` }}>
+                  +{p.amount.toFixed(1)}
                 </span>
-                <span className="pickaxe">⛏️</span>
-                {popups.map((p) => (
-                  <span
-                    key={p.id}
-                    className="strike-popup"
-                    style={{ left: `${30 + Math.random() * 40}%` }}
-                  >
-                    +{p.amount.toFixed(1)}
-                  </span>
-                ))}
-              </>
-            )}
+              ))}
 
             {status === "revealing" && result && (
               <div className="reveal-overlay">
