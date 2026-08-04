@@ -861,9 +861,8 @@ header h1::before {
 
 /* --- Wykop crystal-drip animation --- */
 .crystal-stream {
-  position: relative;
-  height: 56px;
-  margin: 4px 0 0;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   pointer-events: none;
 }
@@ -911,20 +910,30 @@ header h1::before {
   }
 }
 
-/* --- Wykop mining scene: pickaxe swinging into a rock, strike-based --- */
+/* --- Wykop mining scene: stick-figure miner swinging into a rock --- */
 .mine-scene {
   position: relative;
-  height: 130px;
+  height: 150px;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 4px 0 8px;
 }
 
+.mine-scene-figures {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  position: relative;
+  z-index: 1;
+}
+
 .mine-rock {
-  font-size: 60px;
+  font-size: 54px;
   filter: drop-shadow(0 0 18px rgba(139, 92, 246, 0.35));
   transform-origin: center;
+  margin-bottom: 4px;
 }
 
 .mine-rock.hit {
@@ -940,27 +949,6 @@ header h1::before {
   100% { transform: translate(0, 0) rotate(0); }
 }
 
-.pickaxe {
-  position: absolute;
-  font-size: 44px;
-  left: 50%;
-  top: 50%;
-  margin-left: -6px;
-  margin-top: -46px;
-  transform-origin: 85% 85%;
-  animation: pickaxeSwing 4s ease-in-out infinite;
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
-}
-
-.mine-scene.charging .pickaxe {
-  animation-duration: 1.1s;
-}
-
-.pickaxe.struck {
-  animation: none;
-  transform: rotate(18deg);
-}
-
 .mine-rock.struck {
   filter: drop-shadow(0 0 26px rgba(251, 191, 36, 0.75));
 }
@@ -972,6 +960,55 @@ header h1::before {
 @keyframes rockCharge {
   0%, 100% { filter: drop-shadow(0 0 18px rgba(139, 92, 246, 0.35)); }
   50% { filter: drop-shadow(0 0 32px rgba(251, 191, 36, 0.65)); }
+}
+
+.miner-figure {
+  width: 100px;
+  height: 108px;
+  overflow: visible;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.miner-figure .miner-limb {
+  stroke: #f1eefc;
+  stroke-width: 5;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.miner-figure .miner-head {
+  fill: #f1eefc;
+}
+
+.miner-figure .miner-lamp {
+  fill: var(--gold-bright);
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.9));
+}
+
+.miner-figure .miner-shadow {
+  fill: rgba(0, 0, 0, 0.35);
+}
+
+.miner-figure .pickaxe-handle {
+  fill: #a8703f;
+}
+
+.miner-figure .pickaxe-head {
+  fill: #b7b0d6;
+}
+
+.miner-swing-arm {
+  transform-origin: 55px 60px;
+  animation: pickaxeSwing 4s ease-in-out infinite;
+}
+
+.mine-scene.charging .miner-swing-arm {
+  animation-duration: 1.1s;
+}
+
+.miner-swing-arm.struck {
+  animation: none;
+  transform: rotate(18deg);
 }
 
 @keyframes pickaxeSwing {

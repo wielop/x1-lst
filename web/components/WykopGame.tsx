@@ -78,6 +78,33 @@ function effectiveChancePct(tier: RarityInfo, durationTier: number): number {
   return (tier.baseChanceBps * scaling) / 10_000 / 100;
 }
 
+/** A little stick-figure miner, mid-swing — replaces the old floating
+ * pickaxe emoji, which read as flat/lifeless on its own. Reuses the same
+ * `pickaxeSwing` keyframe the emoji version used, just applied to the
+ * whole swinging-arm group instead of a single glyph, pivoting at the
+ * shoulder so the pickaxe head actually arcs down toward the rock. */
+function MinerFigure({ struck }: { struck: boolean }) {
+  return (
+    <svg viewBox="0 0 140 150" className="miner-figure" aria-hidden="true">
+      <ellipse cx="55" cy="141" rx="36" ry="6" className="miner-shadow" />
+      <path d="M 55 95 L 40 138" className="miner-limb" />
+      <path d="M 55 95 L 72 138" className="miner-limb" />
+      <path d="M 55 50 L 55 95" className="miner-limb" />
+      <path d="M 55 60 L 32 80" className="miner-limb" />
+      <circle cx="55" cy="34" r="16" className="miner-head" />
+      <circle cx="65" cy="31" r="3" className="miner-lamp" />
+      <g className={`miner-swing-arm${struck ? " struck" : ""}`}>
+        <path d="M 55 60 L 92 42" className="miner-limb" />
+        <g transform="translate(92,42) rotate(-35)">
+          <rect x="-2" y="-2.5" width="32" height="5" rx="2" className="pickaxe-handle" />
+          <path d="M 28 -14 L 42 -30 L 49 -24 L 35 -8 Z" className="pickaxe-head" />
+          <path d="M 28 14 L 42 30 L 49 24 L 35 8 Z" className="pickaxe-head" />
+        </g>
+      </g>
+    </svg>
+  );
+}
+
 function buildSessionState(
   sessionId: bigint,
   durationTier: number,
@@ -608,10 +635,12 @@ function DigSessionRow({
 
             {s.status !== "error" && (
               <>
-                <span className={`mine-rock hit${s.status === "revealing" ? " struck" : ""}`} key={s.strikeKey}>
-                  🪨
-                </span>
-                <span className={`pickaxe${s.status === "revealing" ? " struck" : ""}`}>⛏️</span>
+                <div className="mine-scene-figures">
+                  <MinerFigure struck={s.status === "revealing"} />
+                  <span className={`mine-rock hit${s.status === "revealing" ? " struck" : ""}`} key={s.strikeKey}>
+                    🪨
+                  </span>
+                </div>
                 {s.status !== "revealing" &&
                   s.popups.map((p) => (
                     <span key={p.id} className="strike-popup" style={{ left: `${30 + Math.random() * 40}%` }}>
