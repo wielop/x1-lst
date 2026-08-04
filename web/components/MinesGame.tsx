@@ -16,7 +16,7 @@ import {
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
-type TileState = "hidden" | "pending" | "safe" | "mine";
+type TileState = "hidden" | "pending" | "safe" | "mine" | "safe-unclicked" | "mine-unclicked";
 type RoundResult = { type: "win"; payout: number; multiplier: number; mineEarned: number } | { type: "lose"; lost: number };
 
 const HOUSE_EDGE_BPS = 200; // mirrors on-chain default; overwritten once config loads
@@ -157,6 +157,29 @@ export function MinesGame() {
     [wallet.publicKey, roundId, status, tiles, appendLog],
   );
 
+  const revealFullLayout = useCallback(async (finishedRoundId: bigint) => {
+    // Only ever called after a round has ended (busted/cashed_out) — the
+    // resolver itself refuses to answer this for a still-active round, see
+    // the comment in resolver/src/http.ts on GET /round-layout.
+    try {
+      const res = await fetch(`/api/round-layout?roundId=${finishedRoundId.toString()}`);
+      if (!res.ok) return;
+      const { mines }: { mines: number[] } = await res.json();
+      const mineSet = new Set(mines);
+      setTiles((prev) => {
+        const next = [...prev];
+        for (let i = 0; i < TOTAL_TILES; i++) {
+          if (next[i] === "hidden") {
+            next[i] = mineSet.has(i) ? "mine-unclicked" : "safe-unclicked";
+          }
+        }
+        return next;
+      });
+    } catch {
+      // best-effort cosmetic reveal — not worth surfacing an error banner for
+    }
+  }, []);
+
   const refreshMineBalance = useCallback(async (): Promise<number | null> => {
     if (!program || !wallet.publicKey) return null;
     try {
@@ -224,13 +247,14 @@ export function MinesGame() {
       const balanceAfter = await refreshMineBalance();
       const mineEarned = balanceAfter !== null ? Math.max(0, balanceAfter - balanceBefore) : 0;
       setLastResult({ type: "win", payout: currentPayout, multiplier: currentMultiplier, mineEarned });
+      revealFullLayout(roundId);
     } catch (err: any) {
       setError(`Cash out failed: ${err.message ?? err}`);
       appendLog(`cash_out failed: ${err.message ?? err}`);
     } finally {
       setBusy(false);
     }
-  }, [program, wallet.publicKey, roundId, currentMultiplier, currentPayout, appendLog, refreshMineBalance, mineBalance]);
+  }, [program, wallet.publicKey, roundId, currentMultiplier, currentPayout, appendLog, refreshMineBalance, mineBalance, revealFullLayout]);
 
   // Poll the round account while a round is active to pick up resolver-side
   // resolve_reveal / bust updates without needing a websocket log parser.
@@ -258,6 +282,7 @@ export function MinesGame() {
           setStatus("busted");
           appendLog("boom — round busted");
           setLastResult({ type: "lose", lost: Number(betAmount) });
+          revealFullLayout(roundId);
         }
 
         // A tile stuck in "pending" for too long means the resolver isn't
@@ -280,7 +305,7 @@ export function MinesGame() {
       }
     }, 1200);
     return () => clearInterval(interval);
-  }, [program, roundId, status, appendLog, pendingSince, betAmount]);
+  }, [program, roundId, status, appendLog, pendingSince, betAmount, revealFullLayout]);
 
   const statusMessage = !wallet.publicKey
     ? "Connect a wallet to play."
@@ -363,9 +388,23 @@ export function MinesGame() {
             className={`tile ${t}${stuckTiles.has(i) ? " stuck" : ""}`}
             disabled={busy || status !== "active" || t !== "hidden"}
             onClick={() => revealTile(i)}
-            title={t === "pending" ? "waiting for resolver..." : undefined}
+            title={
+              t === "pending"
+                ? "waiting for resolver..."
+                : t === "safe-unclicked"
+                  ? "was safe — you didn't click it"
+                  : t === "mine-unclicked"
+                    ? "was a mine"
+                    : undefined
+            }
           >
-            {t === "safe" ? "💎" : t === "mine" ? "💥" : t === "pending" ? (stuckTiles.has(i) ? "!" : "…") : ""}
+            {t === "safe" || t === "safe-unclicked"
+              ? "💎"
+              : t === "mine" || t === "mine-unclicked"
+                ? "💥"
+                : t === "pending"
+                  ? stuckTiles.has(i) ? "!" : "…"
+                  : ""}
           </button>
         ))}
       </div>

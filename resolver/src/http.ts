@@ -61,7 +61,41 @@ export function startHttpServer(): void {
       return;
     }
 
-    if (req.method !== "POST" || req.url !== "/reveal") {
+    const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+
+    if (req.method === "GET" && url.pathname === "/round-layout") {
+      try {
+        const roundId = BigInt(url.searchParams.get("roundId") ?? "-1");
+        const [round] = roundPda(roundId);
+        const roundAccount: any = await (program.account as any).round.fetch(round);
+
+        // Only ever reveal the full mine layout for a round that has
+        // already ended (Busted or CashedOut). Serving this for an Active
+        // round would hand the player exactly the read-before-you-click
+        // exploit this whole commit-reveal architecture exists to prevent.
+        if (roundAccount.status === 0) {
+          sendJson(res, 409, { error: "round is still active, layout withheld" });
+          return;
+        }
+
+        const seedCommitment = bytesToHex(roundAccount.seedCommitment);
+        const record = findSeedByHash(store, seedCommitment);
+        if (!record) {
+          sendJson(res, 500, { error: "unknown seed commitment for this round" });
+          return;
+        }
+
+        const clientSeed = Buffer.from(roundAccount.clientSeed);
+        const mineCount: number = roundAccount.mineCount;
+        const mineSet = deriveMineSet(Buffer.from(record.raw, "hex"), roundId, clientSeed, mineCount);
+        sendJson(res, 200, { mines: [...mineSet].sort((a, b) => a - b) });
+      } catch (err: any) {
+        sendJson(res, 500, { error: String(err.message ?? err) });
+      }
+      return;
+    }
+
+    if (req.method !== "POST" || url.pathname !== "/reveal") {
       sendJson(res, 404, { error: "not found" });
       return;
     }
