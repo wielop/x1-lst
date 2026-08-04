@@ -236,6 +236,16 @@
           "isSigner": false
         },
         {
+          "name": "stakingPool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "rewardVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
           "name": "systemProgram",
           "isMut": false,
           "isSigner": false
@@ -664,6 +674,16 @@
           "isSigner": false
         },
         {
+          "name": "stakingPool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "rewardVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
           "name": "tokenProgram",
           "isMut": false,
           "isSigner": false
@@ -758,6 +778,27 @@
           "isSigner": false
         },
         {
+          "name": "poolXntVault",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Read-only — resolve_dig only reads live reserves to price the",
+            "floor, never trades against the pool itself. Required (not",
+            "optional): this program's operator initializes+seeds the liquidity",
+            "pool immediately after deploying this, before any dig resolves."
+          ]
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "liquidityPool",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
           "name": "tokenProgram",
           "isMut": false,
           "isSigner": false
@@ -824,7 +865,50 @@
       ],
       "args": [
         {
-          "name": "stakeLockupSeconds",
+          "name": "lockTiers",
+          "type": {
+            "vec": {
+              "defined": "LockTier"
+            }
+          }
+        },
+        {
+          "name": "burnWeightMultiplierBps",
+          "type": "u32"
+        },
+        {
+          "name": "skimBps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "updateStakingParams",
+      "docs": [
+        "Admin-only tuning knob for the skim rate and burn multiplier —",
+        "lock tiers themselves aren't updatable in v1 (kept simple; positions",
+        "already snapshot their multiplier at stake time so changing the menu",
+        "later wouldn't retroactively affect them anyway)."
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "stakingPool",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "skimBps",
+          "type": "u16"
+        },
+        {
+          "name": "burnWeightMultiplierBps",
           "type": "u32"
         }
       ]
@@ -877,6 +961,10 @@
         {
           "name": "amount",
           "type": "u64"
+        },
+        {
+          "name": "lockTier",
+          "type": "u8"
         }
       ]
     },
@@ -924,15 +1012,17 @@
           "isSigner": false
         }
       ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ]
+      "args": []
     },
     {
       "name": "claimYield",
+      "docs": [
+        "The only staking instruction that ever moves lamports — bundles",
+        "whatever's been banked in `unclaimed_lamports` (from stake/unstake/",
+        "burn_and_boost, which never touch lamports directly) plus anything",
+        "newly accrued since, and pays it all out in one transfer. No SPL",
+        "token CPI happens in this instruction."
+      ],
       "accounts": [
         {
           "name": "staker",
@@ -958,14 +1048,251 @@
       "args": []
     },
     {
-      "name": "fundStakingRewards",
+      "name": "burnAndBoost",
       "docs": [
-        "Admin/treasury-operated: moves accumulated house revenue that's",
-        "otherwise just sitting in the shared `vault` into the staking reward",
-        "pool, and bumps the accumulator so existing stakers can claim their",
-        "pro-rata share. Requires at least one staker — funding with zero",
-        "stakers would permanently strand the lamports (no one's",
-        "`acc_reward_per_share` delta could ever account for them)."
+        "Permanently destroys `amount` $MINE in exchange for a *permanent*",
+        "weight boost — bigger than any timed lock tier, and unlike a lock,",
+        "never expires and never comes back. This is the \"lock and burn\"",
+        "option: real, irreversible supply reduction, not just reduced",
+        "circulating supply. Independent of any active timed lock — a",
+        "position can have both simultaneously."
+      ],
+      "accounts": [
+        {
+          "name": "staker",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "stakingPool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "position",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "rewardVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "stakerMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initializeLiquidityPool",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "config",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolAuthority",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "pool_mine_vault."
+          ]
+        },
+        {
+          "name": "poolXntVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "adminMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "initialXnt",
+          "type": "u64"
+        },
+        {
+          "name": "initialMine",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "swapXntForMine",
+      "accounts": [
+        {
+          "name": "trader",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolXntVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "traderMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "associatedTokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "xntIn",
+          "type": "u64"
+        },
+        {
+          "name": "minMineOut",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "swapMineForXnt",
+      "accounts": [
+        {
+          "name": "trader",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolXntVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "traderMineAta",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "mineIn",
+          "type": "u64"
+        },
+        {
+          "name": "minXntOut",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "buybackAndBurn",
+      "docs": [
+        "Treasury-operated: takes XNT already sitting in the shared game",
+        "`vault` (accumulated house edge), swaps it into the liquidity pool",
+        "for $MINE at the current spot price, and burns it — permanently",
+        "reduces supply and pushes the pool's spot price up, a direct,",
+        "real counter-pressure against sell pressure (complements staking,",
+        "which slows selling but doesn't reduce supply)."
       ],
       "accounts": [
         {
@@ -984,19 +1311,39 @@
           "isSigner": false
         },
         {
-          "name": "stakingPool",
+          "name": "pool",
           "isMut": true,
           "isSigner": false
         },
         {
-          "name": "rewardVault",
+          "name": "poolXntVault",
           "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolMineVault",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "poolAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "mineMint",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
           "isSigner": false
         }
       ],
       "args": [
         {
-          "name": "amount",
+          "name": "xntAmount",
           "type": "u64"
         }
       ]
@@ -1299,16 +1646,59 @@
             "type": "publicKey"
           },
           {
-            "name": "totalStaked",
-            "type": "u64"
-          },
-          {
-            "name": "accRewardPerShare",
+            "name": "totalWeight",
+            "docs": [
+              "Sum of every position's (locked_weight + burned_weight) — reward",
+              "distribution is proportional to WEIGHT, not raw staked token count,",
+              "which is what makes \"lock longer = earn more\" and \"burn = earn even",
+              "more, permanently\" both fall out of the same accumulator math."
+            ],
             "type": "u128"
           },
           {
-            "name": "stakeLockupSeconds",
+            "name": "accRewardPerWeight",
+            "type": "u128"
+          },
+          {
+            "name": "unallocatedRewards",
+            "docs": [
+              "House-edge skim that arrived while total_weight was still zero",
+              "(nowhere to attribute it to yet) — see `settle_unallocated`, swept",
+              "in as soon as there's real weight to divide it across."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lockTiers",
+            "type": {
+              "array": [
+                {
+                  "defined": "LockTier"
+                },
+                6
+              ]
+            }
+          },
+          {
+            "name": "activeLockTierCount",
+            "type": "u8"
+          },
+          {
+            "name": "burnWeightMultiplierBps",
+            "docs": [
+              "Multiplier applied to permanently-burned $MINE via `burn_and_boost`",
+              "(bps, 10_000 = 1x) — set higher than any timed lock tier since it's",
+              "a one-way, irreversible commitment."
+            ],
             "type": "u32"
+          },
+          {
+            "name": "skimBps",
+            "docs": [
+              "% of every Mines/Wykop wager auto-routed here (see",
+              "`route_wager_skim`), bps."
+            ],
+            "type": "u16"
           },
           {
             "name": "bump",
@@ -1335,16 +1725,50 @@
             "type": "publicKey"
           },
           {
-            "name": "stakedAmount",
+            "name": "lockedAmount",
+            "docs": [
+              "Raw $MINE currently locked, redeemable via `unstake` once",
+              "`unlock_at` passes. Zero if nothing is currently locked (a position",
+              "can still hold nonzero `burned_weight` with no active lock)."
+            ],
             "type": "u64"
+          },
+          {
+            "name": "lockedWeight",
+            "docs": [
+              "locked_amount * chosen tier's multiplier, snapshotted at stake time."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "burnedWeight",
+            "docs": [
+              "Permanent weight from `burn_and_boost` — never decreases, never",
+              "withdrawable (the underlying $MINE no longer exists)."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "unlockAt",
+            "type": "i64"
           },
           {
             "name": "rewardDebt",
             "type": "u128"
           },
           {
-            "name": "stakedAt",
-            "type": "i64"
+            "name": "unclaimedLamports",
+            "docs": [
+              "Pending reward \"banked\" here whenever weight changes (stake/unstake/",
+              "burn_and_boost), instead of paying it out immediately — those",
+              "instructions also do an SPL token CPI (transfer/burn), and this",
+              "program never mixes a raw lamport pointer mutation with a token CPI",
+              "in the same instruction (the two together tripped Solana's",
+              "lamport-conservation check under real testing — see the note on",
+              "`claim_yield`). Only `claim_yield` (no token CPI at all) ever",
+              "actually moves lamports out of the reward vault."
+            ],
+            "type": "u64"
           },
           {
             "name": "bump",
@@ -1366,6 +1790,44 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LiquidityPool",
+      "docs": [
+        "Minimal constant-product $MINE/XNT pool. Reserves are just the live",
+        "balances of `pool_xnt_vault`/`pool_mine_vault` — deliberately no",
+        "separate ledger fields to keep in sync (a whole class of accounting",
+        "bugs avoided by not duplicating what's already on-chain truth)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mineMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "mineVault",
+            "type": "publicKey"
+          },
+          {
+            "name": "xntVaultBump",
+            "type": "u8"
+          },
+          {
+            "name": "poolAuthorityBump",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "totalXntVolume",
+            "type": "u64"
           }
         ]
       }
@@ -1401,6 +1863,27 @@
                 3
               ]
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "LockTier",
+      "docs": [
+        "One lock-duration option on the staking menu (e.g. 0/30/90/180 days).",
+        "`weight_multiplier_bps` is what makes longer locks earn a bigger share",
+        "of the same reward pool on the same underlying token amount."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "durationSeconds",
+            "type": "u32"
+          },
+          {
+            "name": "weightMultiplierBps",
+            "type": "u32"
           }
         ]
       }
@@ -1892,7 +2375,32 @@
       "name": "StakingPoolInitialized",
       "fields": [
         {
-          "name": "stakeLockupSeconds",
+          "name": "skimBps",
+          "type": "u16",
+          "index": false
+        },
+        {
+          "name": "burnWeightMultiplierBps",
+          "type": "u32",
+          "index": false
+        },
+        {
+          "name": "activeLockTierCount",
+          "type": "u8",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "StakingParamsUpdated",
+      "fields": [
+        {
+          "name": "skimBps",
+          "type": "u16",
+          "index": false
+        },
+        {
+          "name": "burnWeightMultiplierBps",
           "type": "u32",
           "index": false
         }
@@ -1912,8 +2420,18 @@
           "index": false
         },
         {
-          "name": "totalStaked",
-          "type": "u64",
+          "name": "lockTier",
+          "type": "u8",
+          "index": false
+        },
+        {
+          "name": "unlockAt",
+          "type": "i64",
+          "index": false
+        },
+        {
+          "name": "weight",
+          "type": "u128",
           "index": false
         }
       ]
@@ -1928,11 +2446,6 @@
         },
         {
           "name": "amount",
-          "type": "u64",
-          "index": false
-        },
-        {
-          "name": "totalStaked",
           "type": "u64",
           "index": false
         }
@@ -1954,7 +2467,32 @@
       ]
     },
     {
-      "name": "StakingRewardsFunded",
+      "name": "BurnedAndBoosted",
+      "fields": [
+        {
+          "name": "owner",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "amountBurned",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "addedWeight",
+          "type": "u128",
+          "index": false
+        },
+        {
+          "name": "totalBurnedWeight",
+          "type": "u128",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "WagerSkimRouted",
       "fields": [
         {
           "name": "amount",
@@ -1962,8 +2500,78 @@
           "index": false
         },
         {
-          "name": "newAccRewardPerShare",
-          "type": "u128",
+          "name": "allocated",
+          "type": "bool",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "LiquidityPoolInitialized",
+      "fields": [
+        {
+          "name": "initialXnt",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "initialMine",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "SwappedXntForMine",
+      "fields": [
+        {
+          "name": "trader",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "xntIn",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineOut",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "SwappedMineForXnt",
+      "fields": [
+        {
+          "name": "trader",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "mineIn",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "xntOut",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    },
+    {
+      "name": "BuybackAndBurned",
+      "fields": [
+        {
+          "name": "xntAmount",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "mineBurned",
+          "type": "u64",
           "index": false
         }
       ]
@@ -2044,6 +2652,21 @@
       "code": 6014,
       "name": "NoStakers",
       "msg": "cannot fund staking rewards with zero stakers"
+    },
+    {
+      "code": 6015,
+      "name": "PoolEmpty",
+      "msg": "liquidity pool has no reserves"
+    },
+    {
+      "code": 6016,
+      "name": "SlippageExceeded",
+      "msg": "swap output is below the requested minimum (slippage)"
+    },
+    {
+      "code": 6017,
+      "name": "AlreadyLocked",
+      "msg": "position already has an active lock, unstake it before locking into a different tier"
     }
   ]
 }

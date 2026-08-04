@@ -13,6 +13,8 @@ import {
   vaultPda,
   roundPda,
   fairMultiplier,
+  stakingPoolPda,
+  rewardVaultPda,
 } from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
@@ -87,6 +89,8 @@ export function MinesGame() {
       const configAccount = await (program.account as any).config.fetch(config);
       const newRoundId: bigint = BigInt(configAccount.totalRounds.toString());
       const [round] = roundPda(newRoundId);
+      const [stakingPool] = stakingPoolPda();
+      const [rewardVault] = rewardVaultPda();
 
       const seed = Buffer.from(crypto.getRandomValues(new Uint8Array(32)));
       const betLamports = Math.round(Number(betAmount) * 1_000_000_000);
@@ -98,6 +102,8 @@ export function MinesGame() {
           config,
           vault,
           round,
+          stakingPool,
+          rewardVault,
           systemProgram: SystemProgram.programId,
         })
         .rpc();

@@ -13,6 +13,9 @@ import {
   digConfigPda,
   digSessionPda,
   mintAuthorityPda,
+  liquidityPoolPda,
+  poolXntVaultPda,
+  poolMineVaultPda,
 } from "./config.js";
 import { loadStore, findSeedByHash, type SeedStoreData } from "./seedStore.js";
 import { deriveMineSet } from "./mineLayout.js";
@@ -161,6 +164,9 @@ export function startHttpServer(): void {
         const config_ = configPda()[0];
         const mintAuthority = mintAuthorityPda()[0];
         const playerMineAta = getAssociatedTokenAddressSync(digConfigAccount.mineMint, sessionAccount.player);
+        const [liquidityPool] = liquidityPoolPda();
+        const [poolXntVault] = poolXntVaultPda();
+        const [poolMineVault] = poolMineVaultPda();
 
         await program.methods
           .resolveDig(rarityHit)
@@ -173,6 +179,9 @@ export function startHttpServer(): void {
             mintAuthority,
             player: sessionAccount.player,
             playerMineAta,
+            poolXntVault,
+            poolMineVault,
+            liquidityPool,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();

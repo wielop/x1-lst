@@ -41,6 +41,42 @@ export function digSessionPda(sessionId: bigint): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([DIG_SESSION_SEED, buf], PROGRAM_ID);
 }
 
+export function stakingPoolPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("staking_pool_v2")], PROGRAM_ID);
+}
+
+export function stakingAuthorityPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("staking_authority_v2")], PROGRAM_ID);
+}
+
+export function rewardVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("reward_vault_v2")], PROGRAM_ID);
+}
+
+export function stakeTokenVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("stake_token_vault_v2")], PROGRAM_ID);
+}
+
+export function stakePositionPda(owner: PublicKey): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("stake_position_v2"), owner.toBuffer()], PROGRAM_ID);
+}
+
+export function liquidityPoolPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("liquidity_pool")], PROGRAM_ID);
+}
+
+export function poolXntVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("pool_xnt_vault")], PROGRAM_ID);
+}
+
+export function poolMineVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("pool_mine_vault")], PROGRAM_ID);
+}
+
+export function poolAuthorityPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("pool_authority")], PROGRAM_ID);
+}
+
 /** Fair (zero-house-edge) hypergeometric multiplier, mirrors the on-chain formula. */
 export function fairMultiplier(revealed: number, mines: number, totalTiles = TOTAL_TILES): number {
   let m = 1;

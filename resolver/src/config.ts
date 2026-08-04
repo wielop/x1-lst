@@ -37,3 +37,15 @@ export function digSessionPda(sessionId: bigint): [PublicKey, number] {
 export function mintAuthorityPda(): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([MINT_AUTHORITY_SEED], PROGRAM_ID);
 }
+
+export function liquidityPoolPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("liquidity_pool")], PROGRAM_ID);
+}
+
+export function poolXntVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("pool_xnt_vault")], PROGRAM_ID);
+}
+
+export function poolMineVaultPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("pool_mine_vault")], PROGRAM_ID);
+}

@@ -5,7 +5,16 @@ import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { PROGRAM_ID, DIG_TIER_LABELS, configPda, vaultPda, digConfigPda, digSessionPda } from "@/lib/config";
+import {
+  PROGRAM_ID,
+  DIG_TIER_LABELS,
+  configPda,
+  vaultPda,
+  digConfigPda,
+  digSessionPda,
+  stakingPoolPda,
+  rewardVaultPda,
+} from "@/lib/config";
 import idl from "@/lib/idl/mines.json";
 
 type Status = "idle" | "digging" | "resolving" | "done";
@@ -92,6 +101,8 @@ export function WykopGame() {
       const [config] = configPda();
       const [digConfig] = digConfigPda();
       const [vault] = vaultPda();
+      const [stakingPool] = stakingPoolPda();
+      const [rewardVault] = rewardVaultPda();
       const newSessionId: bigint = BigInt(digConfigData.totalSessions.toString());
       const [session] = digSessionPda(newSessionId);
       const clientSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)));
@@ -111,6 +122,8 @@ export function WykopGame() {
           session,
           mineMint: digConfigData.mineMint,
           playerMineAta,
+          stakingPool,
+          rewardVault,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
