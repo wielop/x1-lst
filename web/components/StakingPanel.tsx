@@ -66,6 +66,15 @@ export function StakingPanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+  // Rolling window of (timestamp, acc_reward_per_weight) samples observed
+  // this session — acc_reward_per_weight only ever increases (see
+  // settle_unallocated/route_wager_skim in lib.rs), so unlike raw pending
+  // yield it's a clean signal to derive a real, non-fabricated "recent
+  // accrual rate" from: how fast has it ACTUALLY been growing lately.
+  const [accSamples, setAccSamples] = useState<{ ts: number; acc: bigint }[]>([]);
+  // Per-position last-claim record, populated only from actions taken in
+  // THIS session (not fetched history) — honest about what it actually is.
+  const [lastClaims, setLastClaims] = useState<Record<string, { amount: number; ts: number }>>({});
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -87,6 +96,13 @@ export function StakingPanel() {
       const [pool] = stakingPoolPda();
       const data = await (program.account as any).stakingPool.fetch(pool);
       setPoolData(data);
+
+      const acc = BigInt(data.accRewardPerWeight.toString());
+      setAccSamples((prev) => {
+        const next = [...prev, { ts: Date.now(), acc }];
+        const cutoff = Date.now() - 10 * 60 * 1000; // keep a 10-minute window
+        return next.filter((s) => s.ts >= cutoff).slice(-200);
+      });
 
       const [rewardVault] = rewardVaultPda();
       const rewardVaultInfo = await connection.getAccountInfo(rewardVault).catch(() => null);
@@ -146,6 +162,32 @@ export function StakingPanel() {
   // live as soon as total_weight > 0 (see route_wager_skim /
   // route_wykop_wager), which it is as soon as anyone has an open position.
   const accRewardPerWeight = poolData ? BigInt(poolData.accRewardPerWeight.toString()) : 0n;
+
+  // Honest "how fast is this filling up" estimate: a straight-line rate
+  // between the oldest and newest sample in the window, in XNT per unit
+  // weight per hour. Requires at least ~20s of real observed spread so a
+  // page-load blip can't produce a wild extrapolated number, and is null
+  // (shown as "gathering data...") until then — never a fabricated/assumed
+  // rate, only ever derived from what actually happened on-chain this
+  // session.
+  const recentAccrualPerWeightPerHour = useMemo(() => {
+    if (accSamples.length < 2) return null;
+    const oldest = accSamples[0];
+    const newest = accSamples[accSamples.length - 1];
+    const dtMs = newest.ts - oldest.ts;
+    if (dtMs < 20_000) return null;
+    const dAcc = newest.acc - oldest.acc;
+    if (dAcc <= 0n) return 0;
+    const perMs = Number(dAcc) / dtMs;
+    const perHour = (perMs * 3_600_000) / Number(ACC_REWARD_SCALE) / 1e9; // XNT per unit weight per hour
+    return perHour;
+  }, [accSamples]);
+
+  const poolAccrualXntPerHour =
+    recentAccrualPerWeightPerHour != null && poolData
+      ? recentAccrualPerWeightPerHour * Number(poolData.totalWeight)
+      : null;
+
   const totalPendingYield = useMemo(
     () => positions.reduce((sum, p) => sum + pendingYieldOf(p, accRewardPerWeight), 0),
     [positions, accRewardPerWeight],
@@ -250,8 +292,10 @@ export function StakingPanel() {
     (pos: PositionRow) => {
       if (!program || !wallet.publicKey) return;
       return runTx(async () => {
+        const amount = pendingYieldOf(pos, accRewardPerWeight);
         const sig = await claimYieldTx(pos);
-        setNotice(`Claimed ${pendingYieldOf(pos, accRewardPerWeight).toFixed(5)} XNT`);
+        setNotice(`Claimed ${amount.toFixed(5)} XNT`);
+        setLastClaims((prev) => ({ ...prev, [pos.publicKey.toBase58()]: { amount, ts: Date.now() } }));
         return sig;
       });
     },
@@ -295,6 +339,10 @@ export function StakingPanel() {
         let sig = "";
         if (pendingBefore > 0) {
           sig = await claimYieldTx(pos);
+          setLastClaims((prev) => ({
+            ...prev,
+            [pos.publicKey.toBase58()]: { amount: pendingBefore, ts: Date.now() },
+          }));
         }
         setNotice(
           pendingBefore > 0
@@ -337,6 +385,11 @@ export function StakingPanel() {
             <div className="stake-stat">
               <span className="stake-stat-label">Reward pool (XNT)</span>
               <span className="stake-stat-value gold">{(rewardPoolXnt ?? 0).toFixed(5)} XNT</span>
+              <span className="stake-stat-sub">
+                {poolAccrualXntPerHour != null
+                  ? `~${poolAccrualXntPerHour.toFixed(5)} XNT/h (recent)`
+                  : "gathering rate data..."}
+              </span>
             </div>
             <div className="stake-stat">
               <span className="stake-stat-label">Your locked</span>
@@ -434,40 +487,56 @@ export function StakingPanel() {
                 {positions.map((pos) => {
                   const remaining = Math.max(0, pos.unlockAt - Math.floor(nowTick / 1000));
                   const pending = pendingYieldOf(pos, accRewardPerWeight);
+                  const posRatePerHour =
+                    recentAccrualPerWeightPerHour != null && !pos.expired
+                      ? recentAccrualPerWeightPerHour * Number(pos.weight)
+                      : null;
+                  const lastClaim = lastClaims[pos.publicKey.toBase58()];
+                  const infoBits: string[] = [];
+                  if (posRatePerHour != null && posRatePerHour > 0) {
+                    infoBits.push(`~${posRatePerHour.toFixed(5)} XNT/h`);
+                  }
+                  if (lastClaim) {
+                    const agoSec = Math.max(0, Math.floor((nowTick - lastClaim.ts) / 1000));
+                    infoBits.push(`last claim ${lastClaim.amount.toFixed(5)} XNT (${formatDuration(agoSec)} ago)`);
+                  }
                   return (
-                    <div key={pos.publicKey.toBase58()} className={`position-row${pos.expired ? " expired" : ""}`}>
-                      <span className="position-kind">{pos.kind === "lock" ? "🔒" : "🔥"}</span>
-                      <span className="position-amount">{(Number(pos.amount) / 1e6).toFixed(2)} $MINE</span>
-                      <span className="position-weight">{(Number(pos.weight) / 1e6).toFixed(1)}w</span>
-                      <span className="position-status">
-                        {pos.expired
-                          ? pos.kind === "lock"
-                            ? "withdrawn"
-                            : "expired"
-                          : remaining > 0
-                            ? `${formatDuration(remaining)} left`
-                            : "ready"}
-                      </span>
-                      <span className="position-pending">{pending > 0 ? `${pending.toFixed(5)} XNT` : ""}</span>
-                      <span className="position-actions">
-                        {!pos.expired && remaining === 0 ? (
-                          <button onClick={() => doClaimAll(pos)} disabled={busy} className="cashout">
-                            {pending > 0
-                              ? pos.kind === "lock"
-                                ? "Withdraw + Claim"
-                                : "Reap + Claim"
-                              : pos.kind === "lock"
-                                ? "Withdraw"
-                                : "Reap now"}
-                          </button>
-                        ) : (
-                          pending > 0 && (
-                            <button onClick={() => doClaim(pos)} disabled={busy} className="cashout">
-                              Claim
+                    <div key={pos.publicKey.toBase58()} className="position-row-wrap">
+                      <div className={`position-row${pos.expired ? " expired" : ""}`}>
+                        <span className="position-kind">{pos.kind === "lock" ? "🔒" : "🔥"}</span>
+                        <span className="position-amount">{(Number(pos.amount) / 1e6).toFixed(2)} $MINE</span>
+                        <span className="position-weight">{(Number(pos.weight) / 1e6).toFixed(1)}w</span>
+                        <span className="position-status">
+                          {pos.expired
+                            ? pos.kind === "lock"
+                              ? "withdrawn"
+                              : "expired"
+                            : remaining > 0
+                              ? `${formatDuration(remaining)} left`
+                              : "ready"}
+                        </span>
+                        <span className="position-pending">{pending > 0 ? `${pending.toFixed(5)} XNT` : ""}</span>
+                        <span className="position-actions">
+                          {!pos.expired && remaining === 0 ? (
+                            <button onClick={() => doClaimAll(pos)} disabled={busy} className="cashout">
+                              {pending > 0
+                                ? pos.kind === "lock"
+                                  ? "Withdraw + Claim"
+                                  : "Reap + Claim"
+                                : pos.kind === "lock"
+                                  ? "Withdraw"
+                                  : "Reap now"}
                             </button>
-                          )
-                        )}
-                      </span>
+                          ) : (
+                            pending > 0 && (
+                              <button onClick={() => doClaim(pos)} disabled={busy} className="cashout">
+                                Claim
+                              </button>
+                            )
+                          )}
+                        </span>
+                      </div>
+                      {infoBits.length > 0 && <div className="position-info">{infoBits.join(" · ")}</div>}
                     </div>
                   );
                 })}

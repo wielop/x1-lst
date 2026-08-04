@@ -753,6 +753,18 @@ header h1::before {
   font-size: 12px;
 }
 
+.position-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.position-info {
+  padding: 0 10px;
+  font-size: 11px;
+  color: #6b6486;
+}
+
 /* --- Wykop crystal-drip animation --- */
 .crystal-stream {
   position: relative;
