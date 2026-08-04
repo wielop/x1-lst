@@ -130,23 +130,22 @@ export function StakingPanel() {
     return () => clearInterval(tick);
   }, []);
 
-  // Mirrors settle_unallocated() exactly (lib.rs): unallocated_rewards only
-  // actually gets swept into acc_reward_per_weight the next time SOME
-  // staking instruction runs — until then, the raw on-chain value looks
-  // stale even though the real, would-be pending yield is already known.
-  // Projecting the sweep here client-side (a pure read, no tx) means the
-  // displayed number is correct immediately, instead of only becoming
-  // accurate after the player happens to trigger some other action first.
-  const accRewardPerWeight = useMemo(() => {
-    if (!poolData) return 0n;
-    const raw = BigInt(poolData.accRewardPerWeight.toString());
-    const unallocated = BigInt(poolData.unallocatedRewards.toString());
-    const totalWeight = BigInt(poolData.totalWeight.toString());
-    if (unallocated > 0n && totalWeight > 0n) {
-      return raw + (unallocated * ACC_REWARD_SCALE) / totalWeight;
-    }
-    return raw;
-  }, [poolData]);
+  // Deliberately the RAW on-chain value, not a projected post-sweep one.
+  // An earlier version of this projected what settle_unallocated() would
+  // do if it ran right now (unallocated_rewards / current total_weight) —
+  // mathematically accurate for existing positions, but it meant a
+  // brand-new position opened right after a stranded backlog built up
+  // (while nobody was staked) would immediately show — and could actually
+  // claim — a share of rewards that predate its own existence, just for
+  // being the only/majority weight-holder the moment a sweep triggers.
+  // That's a real windfall, not a display bug, so showing it early was
+  // actively misleading rather than merely "eager." Sticking to the raw
+  // value means pending only ever reflects reward growth that has ALREADY
+  // landed on-chain — in practice this catches up on its own almost
+  // immediately now, since every wager skim updates acc_reward_per_weight
+  // live as soon as total_weight > 0 (see route_wager_skim /
+  // route_wykop_wager), which it is as soon as anyone has an open position.
+  const accRewardPerWeight = poolData ? BigInt(poolData.accRewardPerWeight.toString()) : 0n;
   const totalPendingYield = useMemo(
     () => positions.reduce((sum, p) => sum + pendingYieldOf(p, accRewardPerWeight), 0),
     [positions, accRewardPerWeight],
