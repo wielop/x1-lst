@@ -275,6 +275,7 @@ pub mod mines {
             bet_amount,
             &ctx.accounts.player.to_account_info(),
             &ctx.accounts.reward_vault.to_account_info(),
+            &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.system_program.to_account_info(),
             &mut ctx.accounts.staking_pool,
         )?;
@@ -2405,6 +2406,7 @@ fn route_wager_skim<'info>(
     wager: u64,
     payer: &AccountInfo<'info>,
     reward_vault: &AccountInfo<'info>,
+    vault: &AccountInfo<'info>,
     system_program: &AccountInfo<'info>,
     pool: &mut Account<'info, StakingPool>,
 ) -> Result<u64> {
@@ -2414,16 +2416,30 @@ fn route_wager_skim<'info>(
     if skim == 0 {
         return Ok(0);
     }
-    invoke(
-        &system_instruction::transfer(payer.key, reward_vault.key, skim),
-        &[payer.clone(), reward_vault.clone(), system_program.clone()],
-    )?;
     if pool.total_weight > 0 {
+        invoke(
+            &system_instruction::transfer(payer.key, reward_vault.key, skim),
+            &[payer.clone(), reward_vault.clone(), system_program.clone()],
+        )?;
         let delta = (skim as u128).checked_mul(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow)?
             .checked_div(pool.total_weight).ok_or(MinesError::MathOverflow)?;
         pool.acc_reward_per_weight = pool.acc_reward_per_weight.checked_add(delta).ok_or(MinesError::MathOverflow)?;
     } else {
-        pool.unallocated_rewards = pool.unallocated_rewards.checked_add(skim).ok_or(MinesError::MathOverflow)?;
+        // Nobody is staked right now to legitimately attribute this to.
+        // Used to strand it in `unallocated_rewards`, waiting for whoever
+        // happened to open the next position to sweep it in and walk away
+        // with the whole backlog regardless of how briefly they'd actually
+        // been staked (confirmed as a real, reproduced windfall on
+        // testnet, 2026-08-04 — the fix here). Routing it straight to the
+        // shared vault instead means there's no unclaimed backlog left
+        // sitting around for a lucky new staker to capture. On mainnet,
+        // with long-running staking participation, total_weight == 0
+        // should be rare-to-never anyway, so this mostly matters for
+        // testnet's cold-start gaps.
+        invoke(
+            &system_instruction::transfer(payer.key, vault.key, skim),
+            &[payer.clone(), vault.clone(), system_program.clone()],
+        )?;
     }
     emit!(WagerSkimRouted { amount: skim, allocated: pool.total_weight > 0 });
     Ok(skim)
@@ -2475,20 +2491,25 @@ fn route_wykop_wager<'info>(
         .checked_sub(buyback_amt).ok_or(MinesError::MathOverflow)?
         .checked_sub(liquidity_amt).ok_or(MinesError::MathOverflow)?;
 
-    // --- staking: identical accumulator-routing logic to route_wager_skim ---
+    // --- staking: same accumulator-routing logic as route_wager_skim,
+    // including routing to the shared vault instead of stranding in
+    // unallocated_rewards when nobody's currently staked (see the comment
+    // there for why). ---
     if staking_amt > 0 {
-        invoke(
-            &system_instruction::transfer(player.key, reward_vault.key, staking_amt),
-            &[player.clone(), reward_vault.clone(), system_program.clone()],
-        )?;
         if staking_pool.total_weight > 0 {
+            invoke(
+                &system_instruction::transfer(player.key, reward_vault.key, staking_amt),
+                &[player.clone(), reward_vault.clone(), system_program.clone()],
+            )?;
             let delta = (staking_amt as u128).checked_mul(ACC_REWARD_SCALE).ok_or(MinesError::MathOverflow)?
                 .checked_div(staking_pool.total_weight).ok_or(MinesError::MathOverflow)?;
             staking_pool.acc_reward_per_weight =
                 staking_pool.acc_reward_per_weight.checked_add(delta).ok_or(MinesError::MathOverflow)?;
         } else {
-            staking_pool.unallocated_rewards =
-                staking_pool.unallocated_rewards.checked_add(staking_amt).ok_or(MinesError::MathOverflow)?;
+            invoke(
+                &system_instruction::transfer(player.key, vault.key, staking_amt),
+                &[player.clone(), vault.clone(), system_program.clone()],
+            )?;
         }
         emit!(WagerSkimRouted { amount: staking_amt, allocated: staking_pool.total_weight > 0 });
     }
