@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider, Program, BN, type Idl } from "@coral-xyz/anchor";
@@ -56,6 +56,64 @@ function formatDuration(seconds: number): string {
   if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.ceil(seconds / 3600)}h`;
   return `${Math.ceil(seconds / 86400)}d`;
+}
+
+/** Recovers which lock/burn tier a position was opened under by matching
+ * its weight/amount ratio back against the tier table's multiplier —
+ * Position itself doesn't store which tier index it used, only the
+ * already-applied weight. Needed to back out `openedAt` below, since
+ * `unlockAt` is the only timestamp on a Position (open time isn't stored
+ * separately either). */
+function tierDurationForPosition(
+  pos: PositionRow,
+  lockTiers: { durationSeconds: number; weightMultiplierBps: number }[],
+  burnTiers: { durationSeconds: number; weightMultiplierBps: number }[],
+): number | null {
+  if (pos.amount === 0n) return null;
+  const tiers = pos.kind === "lock" ? lockTiers : burnTiers;
+  if (tiers.length === 0) return null;
+  const bps = Number((pos.weight * 10_000n) / pos.amount);
+  let best = tiers[0];
+  let bestDiff = Math.abs(best.weightMultiplierBps - bps);
+  for (const t of tiers.slice(1)) {
+    const diff = Math.abs(t.weightMultiplierBps - bps);
+    if (diff < bestDiff) {
+      best = t;
+      bestDiff = diff;
+    }
+  }
+  return best.durationSeconds;
+}
+
+/** Sums every past `claim_yield` payout a position has ever received, by
+ * walking that position account's own transaction history and reading the
+ * reward vault's lamport balance drop across each ClaimYield call — no
+ * event-log decoding needed, and no risk of missing history the way a
+ * purely session-local running total would (see the comment on
+ * `lastClaims` in the component below). `getSignaturesForAddress` on the
+ * position PDA itself keeps this cheap: a position typically has a
+ * handful of transactions total (open, maybe a few claims, maybe an
+ * expire), never the program's whole history. */
+async function fetchPastClaimedLamports(
+  connection: import("@solana/web3.js").Connection,
+  positionPubkey: PublicKey,
+  rewardVault: PublicKey,
+): Promise<bigint> {
+  const sigs = await connection.getSignaturesForAddress(positionPubkey, { limit: 50 });
+  let total = 0n;
+  for (const s of sigs) {
+    if (s.err) continue;
+    const tx = await connection.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 }).catch(() => null);
+    if (!tx || !tx.meta) continue;
+    const logs = tx.meta.logMessages ?? [];
+    if (!logs.some((l) => l.includes("Instruction: ClaimYield"))) continue;
+    const keys = tx.transaction.message.getAccountKeys().staticAccountKeys;
+    const idx = keys.findIndex((k) => k.equals(rewardVault));
+    if (idx === -1) continue;
+    const delta = BigInt(tx.meta.preBalances[idx]) - BigInt(tx.meta.postBalances[idx]);
+    if (delta > 0n) total += delta;
+  }
+  return total;
 }
 
 /** Small click-to-toggle "ⓘ" popover — keeps the default UI to one short
@@ -116,6 +174,14 @@ export function StakingPanel() {
     null,
   );
   const [showCompleted, setShowCompleted] = useState(false);
+  // Real lifetime-earned total per position (past claims, fetched once
+  // from that position's own tx history, + whatever's pending right now)
+  // — unlike accSamples/recentAccrualPerWeightPerHour above, this isn't
+  // reset by quiet stretches between wagers, so it stays meaningful even
+  // when nobody's played anything for the last few minutes. See
+  // fetchPastClaimedLamports for why this is cheap enough to just do.
+  const [lifetime, setLifetime] = useState<Record<string, { pastClaimedXnt: number; openedAt: number | null }>>({});
+  const lifetimeFetchingRef = useRef<Set<string>>(new Set());
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
@@ -311,6 +377,31 @@ export function StakingPanel() {
     ? poolData.burnTiers.slice(0, poolData.activeBurnTierCount)
     : [];
 
+  // Fetch each position's lifetime-claimed history exactly once (dedup'd
+  // via lifetimeFetchingRef, same pattern as resolveSession's use of
+  // resolvingRef in WykopGame) — never re-fetched just because `refresh()`
+  // ticks every 3s, only when a position we haven't seen before shows up.
+  useEffect(() => {
+    if (lockTiers.length === 0 && burnTiers.length === 0) return;
+    for (const pos of positions) {
+      const key = pos.publicKey.toBase58();
+      if (lifetime[key] || lifetimeFetchingRef.current.has(key)) continue;
+      lifetimeFetchingRef.current.add(key);
+      const durationSeconds = tierDurationForPosition(pos, lockTiers, burnTiers);
+      const openedAt = durationSeconds != null ? pos.unlockAt - durationSeconds : null;
+      const [rewardVault] = rewardVaultPda();
+      fetchPastClaimedLamports(connection, pos.publicKey, rewardVault)
+        .then((lamports) => {
+          setLifetime((prev) => ({ ...prev, [key]: { pastClaimedXnt: Number(lamports) / 1e9, openedAt } }));
+        })
+        .catch(() => {
+          // Leave it un-cached — the per-position lifetime line just won't
+          // show for this one, rather than showing a wrong number.
+          lifetimeFetchingRef.current.delete(key);
+        });
+    }
+  }, [positions, lockTiers, burnTiers, connection, lifetime]);
+
   const runTx = useCallback(
     async (fn: () => Promise<string>) => {
       setBusy(true);
@@ -495,7 +586,11 @@ export function StakingPanel() {
             <div className="stake-stat">
               <span className="stake-stat-label">Estimated APY</span>
               <span className="stake-stat-value gold">{estimatedApyPct != null ? `${estimatedApyPct.toFixed(2)}%` : "-"}</span>
-              <span className="stake-stat-sub">based on recent rate</span>
+              <span className="stake-stat-sub">
+                {estimatedApyPct === 0
+                  ? "idle — no wagers the last few min"
+                  : "based on recent rate"}
+              </span>
             </div>
             <div className="stake-stat">
               <span className="stake-stat-label">Total weight (pool)</span>
@@ -607,9 +702,23 @@ export function StakingPanel() {
                       ? recentAccrualPerWeightPerHour * Number(pos.weight)
                       : null;
                   const lastClaim = lastClaims[pos.publicKey.toBase58()];
+                  const posLifetime = lifetime[pos.publicKey.toBase58()];
                   const infoBits: string[] = [];
                   if (posRatePerHour != null && posRatePerHour > 0) {
-                    infoBits.push(`~${posRatePerHour.toFixed(5)} XNT/h`);
+                    infoBits.push(`~${posRatePerHour.toFixed(5)} XNT/h now`);
+                  }
+                  // Real total earned over this position's whole life (past
+                  // claims + whatever's pending right now), divided by real
+                  // elapsed time — doesn't go quiet between wagers the way
+                  // the live "recent rate" above does, so it's what
+                  // actually answers "is this position earning?" during a
+                  // lull. See fetchPastClaimedLamports / tierDurationForPosition.
+                  if (posLifetime?.openedAt != null) {
+                    const ageHours = Math.max(0.01, (nowTick / 1000 - posLifetime.openedAt) / 3600);
+                    const lifetimeTotal = posLifetime.pastClaimedXnt + pending;
+                    if (lifetimeTotal > 0) {
+                      infoBits.push(`~${(lifetimeTotal / ageHours).toFixed(5)} XNT/h lifetime avg`);
+                    }
                   }
                   if (lastClaim) {
                     const agoSec = Math.max(0, Math.floor((nowTick - lastClaim.ts) / 1000));
