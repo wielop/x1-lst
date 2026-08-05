@@ -969,15 +969,43 @@ header h1::before {
   filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
 }
 
-.miner-figure .miner-limb {
-  stroke: #f1eefc;
-  stroke-width: 5;
+.miner-figure .miner-leg {
+  stroke: #e08a1e;
+  stroke-width: 11;
   stroke-linecap: round;
   fill: none;
 }
 
+.miner-figure .miner-boot {
+  fill: #3f2417;
+}
+
+.miner-figure .miner-torso {
+  fill: #3b6bd8;
+}
+
+.miner-figure .miner-arm-static,
+.miner-figure .miner-arm-swing {
+  stroke: #3b6bd8;
+  stroke-width: 9;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.miner-figure .miner-hand {
+  fill: #e8b98a;
+}
+
 .miner-figure .miner-head {
-  fill: #f1eefc;
+  fill: #e8b98a;
+}
+
+.miner-figure .miner-helmet {
+  fill: #f2751a;
+}
+
+.miner-figure .miner-helmet-brim {
+  fill: #c85f14;
 }
 
 .miner-figure .miner-lamp {
@@ -994,7 +1022,7 @@ header h1::before {
 }
 
 .miner-swing-arm {
-  transform-origin: 55px 60px;
+  transform-origin: 70px 54px;
   animation: pickaxeSwing 4s ease-in-out infinite;
 }
 

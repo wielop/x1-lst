@@ -78,24 +78,44 @@ function effectiveChancePct(tier: RarityInfo, durationTier: number): number {
   return (tier.baseChanceBps * scaling) / 10_000 / 100;
 }
 
-/** A little stick-figure miner, mid-swing — replaces the old floating
- * pickaxe emoji, which read as flat/lifeless on its own. Reuses the same
- * `pickaxeSwing` keyframe the emoji version used, just applied to the
- * whole swinging-arm group instead of a single glyph, pivoting at the
- * shoulder so the pickaxe head actually arcs down toward the rock. */
+/** A fleshed-out illustrated miner (helmet, shirt, overalls, boots) —
+ * replaces the old bare-wireframe stick figure, which read as a lifeless
+ * blob on its own. Keeps the exact same swing-arm skeleton and
+ * `pickaxeSwing` keyframe as the stick-figure version (shoulder pivot,
+ * arm path, emoji pickaxe) since that geometry was fiddly to get right
+ * the first time — only the body around it is new. Layering order
+ * matters here: the helmet is a full ellipse painted *behind* the head
+ * circle, so the head circle's fill covers its lower half and only the
+ * dome peeks out above, like a hard hat actually sitting on a head. */
 function MinerFigure({ struck }: { struck: boolean }) {
   return (
     <svg viewBox="0 0 140 150" className="miner-figure" aria-hidden="true">
-      <ellipse cx="55" cy="141" rx="36" ry="6" className="miner-shadow" />
-      <path d="M 55 95 L 40 138" className="miner-limb" />
-      <path d="M 55 95 L 72 138" className="miner-limb" />
-      <path d="M 55 50 L 55 95" className="miner-limb" />
-      <path d="M 55 60 L 35 78" className="miner-limb" />
-      <circle cx="55" cy="34" r="16" className="miner-head" />
-      <circle cx="65" cy="31" r="3" className="miner-lamp" />
+      <ellipse cx="58" cy="141" rx="38" ry="6" className="miner-shadow" />
+
+      {/* legs + boots */}
+      <path d="M 55 96 L 40 138" className="miner-leg" />
+      <path d="M 55 96 L 72 138" className="miner-leg" />
+      <ellipse cx="40" cy="140" rx="9" ry="5" className="miner-boot" />
+      <ellipse cx="72" cy="140" rx="9" ry="5" className="miner-boot" />
+
+      {/* torso (shirt) */}
+      <rect x="39" y="46" width="32" height="50" rx="12" className="miner-torso" />
+
+      {/* static (near-side) arm */}
+      <path d="M 42 54 L 25 80" className="miner-arm-static" />
+      <circle cx="25" cy="82" r="6" className="miner-hand" />
+
+      {/* head + hard hat */}
+      <ellipse cx="55" cy="26" rx="18" ry="15" className="miner-helmet" />
+      <circle cx="55" cy="34" r="15" className="miner-head" />
+      <rect x="36" y="26" width="38" height="5" rx="2.5" className="miner-helmet-brim" />
+      <circle cx="63" cy="22" r="3" className="miner-lamp" />
+
+      {/* swinging arm + pickaxe */}
       <g className={`miner-swing-arm${struck ? " struck" : ""}`}>
-        <path d="M 55 60 L 90 44" className="miner-limb" />
-        <text x="98" y="40" className="pickaxe-emoji" transform="rotate(-20 98 40)">
+        <path d="M 70 54 L 100 40" className="miner-arm-swing" />
+        <circle cx="100" cy="40" r="6" className="miner-hand" />
+        <text x="108" y="36" className="pickaxe-emoji" transform="rotate(-20 108 36)">
           ⛏️
         </text>
       </g>
