@@ -33,6 +33,31 @@ function bytesToHex(bytes: number[] | Buffer): string {
   return Buffer.from(bytes).toString("hex");
 }
 
+/** The chain's own `Clock::get()?.unix_timestamp` — which is what
+ * `resolve_dig`'s `elapsed >= required` check actually runs against — can
+ * lag the resolver's wall clock by a second or more on a lightly-loaded
+ * testnet (slot times aren't a perfect 400ms). Checking against
+ * `Date.now()` let the resolver fire a fraction of a second "early" by the
+ * chain's own reckoning, which the program then rejects with
+ * `DigNotFinished`. Falls back to wall-clock (never lags the *real* time,
+ * so it can only make us wait a little longer, never fire early) if the
+ * RPC call itself fails. */
+async function getClusterUnixTime(connection: Connection): Promise<number> {
+  try {
+    const slot = await connection.getSlot("confirmed");
+    const blockTime = await connection.getBlockTime(slot);
+    if (blockTime != null) return blockTime;
+  } catch {
+    // fall through to wall-clock fallback
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+function isDigNotFinished(err: any): boolean {
+  const msg = String(err?.message ?? err);
+  return msg.includes("DigNotFinished") || msg.includes("6012");
+}
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown) {
   const data = JSON.stringify(body);
   res.writeHead(status, {
@@ -129,7 +154,8 @@ export function startHttpServer(): void {
         }
 
         const requiredSeconds = digConfigAccount.tierDurations[sessionAccount.durationTier];
-        const elapsedSeconds = Math.floor(Date.now() / 1000) - Number(sessionAccount.startTs);
+        const clusterNow = await getClusterUnixTime(connection);
+        const elapsedSeconds = clusterNow - Number(sessionAccount.startTs);
         if (elapsedSeconds < requiredSeconds) {
           sendJson(res, 409, {
             error: "dig session hasn't finished yet",
@@ -168,23 +194,38 @@ export function startHttpServer(): void {
         const [poolXntVault] = poolXntVaultPda();
         const [poolMineVault] = poolMineVaultPda();
 
-        await program.methods
-          .resolveDig(rarityHit)
-          .accounts({
-            resolverAuthority: resolverKeypair.publicKey,
-            config: config_,
-            digConfig,
-            session,
-            mineMint: digConfigAccount.mineMint,
-            mintAuthority,
-            player: sessionAccount.player,
-            playerMineAta,
-            poolXntVault,
-            poolMineVault,
-            liquidityPool,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .rpc();
+        // Belt-and-suspenders on top of the getClusterUnixTime check above:
+        // that check and this .rpc() aren't atomic, so on a slow/stalled
+        // slot the chain's clock could still not have ticked over by the
+        // time this instruction actually executes. Retry a few times on
+        // DigNotFinished specifically (never on any other error) instead of
+        // bouncing the player straight to a "Something went wrong" screen
+        // for what's really just "not quite yet".
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await program.methods
+              .resolveDig(rarityHit)
+              .accounts({
+                resolverAuthority: resolverKeypair.publicKey,
+                config: config_,
+                digConfig,
+                session,
+                mineMint: digConfigAccount.mineMint,
+                mintAuthority,
+                player: sessionAccount.player,
+                playerMineAta,
+                poolXntVault,
+                poolMineVault,
+                liquidityPool,
+                tokenProgram: TOKEN_PROGRAM_ID,
+              })
+              .rpc();
+            break;
+          } catch (err) {
+            if (!isDigNotFinished(err) || attempt >= 4) throw err;
+            await new Promise((r) => setTimeout(r, 1_500));
+          }
+        }
 
         console.log(`[resolver] dig session ${sessionId} -> rarity ${rarityHit === 0xff ? "none" : rarityHit}`);
         sendJson(res, 200, { rarityHit });
