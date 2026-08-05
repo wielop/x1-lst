@@ -239,6 +239,18 @@ export function StakingPanel() {
   // (shown as "gathering data...") until then — never a fabricated/assumed
   // rate, only ever derived from what actually happened on-chain this
   // session.
+  //
+  // A positive delta is trusted immediately at the 20s floor — any real
+  // growth is real growth, no matter how short the window. A FLAT delta
+  // isn't: wagers land in lumps (one skim per start_dig/start_round call),
+  // not as a smooth drip, and the shortest Wykop tier alone runs 90s — so a
+  // 20s slice will almost always straddle pure quiet time between wagers,
+  // even under genuinely active play. Reporting that as a flat "0.00%"
+  // read as "this pool pays nothing" to a player who'd just watched it
+  // pay out minutes earlier. So a flat delta only downgrades to a
+  // confident 0 once we've watched it stay flat for several minutes —
+  // before that it stays null ("gathering data..."), same as not having
+  // enough samples yet.
   const recentAccrualPerWeightPerHour = useMemo(() => {
     if (accSamples.length < 2) return null;
     const oldest = accSamples[0];
@@ -246,7 +258,7 @@ export function StakingPanel() {
     const dtMs = newest.ts - oldest.ts;
     if (dtMs < 20_000) return null;
     const dAcc = newest.acc - oldest.acc;
-    if (dAcc <= 0n) return 0;
+    if (dAcc <= 0n) return dtMs >= 3 * 60_000 ? 0 : null;
     const perMs = Number(dAcc) / dtMs;
     const perHour = (perMs * 3_600_000) / Number(ACC_REWARD_SCALE) / 1e9; // XNT per unit weight per hour
     return perHour;
