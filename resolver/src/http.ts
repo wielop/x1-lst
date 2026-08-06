@@ -277,41 +277,6 @@ export function startHttpServer(): void {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/register-round-secret") {
-      try {
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
-        const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-        const roundId = BigInt(body.roundId);
-        const secret = String(body.secret ?? "");
-        if (!secret || secret.length < 16) {
-          sendJson(res, 400, { error: "secret missing or too short" });
-          return;
-        }
-        const key = roundId.toString();
-        if (roundSecrets.has(key)) {
-          // First-write-wins — see the comment above roundSecrets. A
-          // second registration attempt for the same round is either a
-          // (harmless) client retry or someone trying to hijack a round
-          // they didn't start; either way, don't overwrite an existing
-          // claim.
-          sendJson(res, 409, { error: "round already has a registered secret" });
-          return;
-        }
-        const [round] = roundPda(roundId);
-        const roundAccount: any = await (program.account as any).round.fetch(round).catch(() => null);
-        if (!roundAccount || roundAccount.status !== 0) {
-          sendJson(res, 409, { error: "round not active" });
-          return;
-        }
-        roundSecrets.set(key, secret);
-        sendJson(res, 200, { ok: true });
-      } catch (err: any) {
-        sendJson(res, 500, { error: String(err.message ?? err) });
-      }
-      return;
-    }
-
     if (req.method !== "POST" || url.pathname !== "/reveal") {
       sendJson(res, 404, { error: "not found" });
       return;
@@ -326,15 +291,6 @@ export function startHttpServer(): void {
       const tileIndex = Number(body.tileIndex);
       if (!Number.isInteger(tileIndex) || tileIndex < 0 || tileIndex > 24) {
         sendJson(res, 400, { error: "tileIndex out of range" });
-        return;
-      }
-
-      // See the roundSecrets comment above /register-round-secret: without
-      // this, roundId alone (a small public sequential counter) was enough
-      // for anyone to force-reveal tiles on someone else's round.
-      const registeredSecret = roundSecrets.get(roundId.toString());
-      if (!registeredSecret || registeredSecret !== String(body.revealSecret ?? "")) {
-        sendJson(res, 403, { error: "missing or invalid revealSecret for this round" });
         return;
       }
 
