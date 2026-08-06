@@ -364,7 +364,16 @@ export function WykopGame() {
           break;
         } catch (err: any) {
           const isSeedsRace = String(err.message ?? err).includes("ConstraintSeeds") || String(err.message ?? err).includes("2006");
-          if (!isSeedsRace || attempt >= 4) throw err;
+          // 5 immediate-retry attempts (no delay) turned out to not be enough
+          // under sustained heavy concurrent load (observed live: a swarm
+          // load test hammering start_dig repeatedly could out-race a
+          // player's own click every single attempt). More attempts plus a
+          // small random stagger before each retry — so competing clients
+          // aren't all retrying in lockstep against the same fresh counter
+          // read — makes eventually winning the race far more likely
+          // without the player having to manually click "try again".
+          if (!isSeedsRace || attempt >= 12) throw err;
+          await new Promise((r) => setTimeout(r, 150 + Math.random() * 250));
         }
       }
 
