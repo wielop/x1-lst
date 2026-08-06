@@ -309,6 +309,19 @@ export function WykopGame() {
       );
       const playerMineAta = getAssociatedTokenAddressSync(digConfigData.mineMint, wallet.publicKey);
 
+      // Same plain-language balance guard as MinesGame's startRound — catch
+      // "can't actually afford this" client-side instead of surfacing a raw
+      // "insufficient funds for rent" simulation error. Found via the
+      // swarm load test.
+      const priceLamports = Number(digConfigData.tierPrices[durationTier].toString());
+      const FEE_RESERVE_LAMPORTS = 5_000_000; // 0.005 XNT
+      const walletBalance = await connection.getBalance(wallet.publicKey);
+      if (priceLamports + FEE_RESERVE_LAMPORTS > walletBalance) {
+        throw new Error(
+          `Not enough XNT: this tier costs ${(priceLamports / 1e9).toFixed(3)}, you have ${(walletBalance / 1e9).toFixed(4)} (need a little extra for fees).`,
+        );
+      }
+
       // `session`'s PDA is seeded with dig_config.total_sessions read LIVE
       // on-chain at instruction-execution time (see StartDig in lib.rs).
       // `digConfigData` here is React state that can be seconds stale (it's

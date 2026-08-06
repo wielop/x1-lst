@@ -92,6 +92,23 @@ export function MinesGame() {
       const seed = Buffer.from(crypto.getRandomValues(new Uint8Array(32)));
       const betLamports = Math.round(Number(betAmount) * 1_000_000_000);
 
+      // Catch "can't actually afford this bet" client-side with a plain-
+      // language message instead of letting it hit the chain and come back
+      // as a raw "Transaction simulation failed: ... insufficient funds for
+      // rent" — accurate, but leaks Solana jargon a player shouldn't need
+      // to know. FEE_RESERVE_LAMPORTS is a generous buffer over the actual
+      // ~5000-lamport tx fee, since the exact rent/fee cost isn't worth
+      // computing precisely here — found via the swarm load test (a
+      // streak-chasing persona that raises its bet after each win
+      // eventually bet down to its last few thousand lamports).
+      const FEE_RESERVE_LAMPORTS = 5_000_000; // 0.005 XNT
+      const walletBalance = await connection.getBalance(wallet.publicKey);
+      if (betLamports + FEE_RESERVE_LAMPORTS > walletBalance) {
+        throw new Error(
+          `Not enough XNT: bet is ${betAmount}, you have ${(walletBalance / 1e9).toFixed(4)} (need a little extra for fees).`,
+        );
+      }
+
       // `round`'s PDA is seeded with config.total_rounds read LIVE on-chain
       // at instruction-execution time (see StartRound in lib.rs), not
       // anything the client can pin down in advance. Under concurrent play
