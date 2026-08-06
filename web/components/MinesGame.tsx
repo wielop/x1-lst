@@ -180,10 +180,24 @@ export function MinesGame() {
         // pick up the outcome by polling the round account below — this
         // keeps clicking through a round to a total of 2 wallet-signed
         // transactions (start_round, cash_out) no matter how many tiles.
+        //
+        // This endpoint has no on-chain transaction to prove who's asking,
+        // which used to mean it had NO auth at all — any wallet could POST
+        // any roundId and force a reveal on someone else's round. Fixed
+        // with a wallet.signMessage() signature (off-chain, no transaction
+        // or fee) over the exact roundId+tileIndex, which the resolver
+        // verifies against the round's actual owner before acting.
+        if (!wallet.signMessage) {
+          throw new Error("This wallet doesn't support message signing, which reveals now require for security.");
+        }
+        const message = `mines-reveal:${roundId.toString()}:${index}`;
+        const signatureBytes = await wallet.signMessage(new TextEncoder().encode(message));
+        const signature = Buffer.from(signatureBytes).toString("base64");
+
         const res = await fetch(`/api/reveal`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ roundId: roundId.toString(), tileIndex: index }),
+          body: JSON.stringify({ roundId: roundId.toString(), tileIndex: index, player: wallet.publicKey.toBase58(), signature }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -205,7 +219,7 @@ export function MinesGame() {
         });
       }
     },
-    [wallet.publicKey, roundId, status, tiles, appendLog],
+    [wallet.publicKey, wallet.signMessage, roundId, status, tiles, appendLog],
   );
 
   const revealFullLayout = useCallback(async (finishedRoundId: bigint) => {

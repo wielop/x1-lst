@@ -455,10 +455,23 @@ export function WykopGame() {
         // to 0 regardless of the real (nonzero) mint amount.
         const balanceBefore = await refreshMineBalance(digConfigData?.mineMint);
 
+        // Same fix as Mines' /reveal: this endpoint used to accept a
+        // settle request for ANY sessionId from anyone, no proof the
+        // caller was that session's own player — anyone could force-settle
+        // someone else's dig the instant its timer elapsed. Now signed
+        // off-chain (wallet.signMessage, no transaction/fee) and verified
+        // by the resolver against the session's actual owner.
+        if (!wallet.signMessage || !wallet.publicKey) {
+          throw new Error("This wallet doesn't support message signing, which settling now requires for security.");
+        }
+        const message = `mines-dig-reveal:${sessionId.toString()}`;
+        const signatureBytes = await wallet.signMessage(new TextEncoder().encode(message));
+        const signature = Buffer.from(signatureBytes).toString("base64");
+
         const res = await fetch(`/api/dig-reveal`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: sessionId.toString() }),
+          body: JSON.stringify({ sessionId: sessionId.toString(), player: wallet.publicKey.toBase58(), signature }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -500,7 +513,7 @@ export function WykopGame() {
         });
       }
     },
-    [program, digConfigData, refreshMineBalance],
+    [program, digConfigData, refreshMineBalance, wallet.publicKey, wallet.signMessage],
   );
 
   // Kicks off the real settlement exactly once per session, as soon as it

@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -65,6 +66,30 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown) {
     "Access-Control-Allow-Origin": "*",
   });
   res.end(data);
+}
+
+// Standard SPKI DER prefix for a raw 32-byte Ed25519 public key — lets
+// Node's built-in crypto.verify handle Ed25519 without pulling in a
+// tweetnacl dependency the resolver doesn't otherwise have.
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/**
+ * Verifies that `signatureB64` is a valid Ed25519 signature by `owner`
+ * over `message` — proves whoever called this HTTP endpoint actually
+ * controls the round/session's own wallet, via wallet.signMessage() on the
+ * client (an off-chain signature, no transaction/fee), rather than the
+ * unauthenticated free-for-all this endpoint used to be. See the
+ * SECURITY NOTE above /reveal for what this closes.
+ */
+function verifyOwnerSignature(message: string, signatureB64: string | undefined, owner: PublicKey): boolean {
+  if (!signatureB64) return false;
+  try {
+    const der = Buffer.concat([ED25519_SPKI_PREFIX, owner.toBuffer()]);
+    const keyObject = crypto.createPublicKey({ key: der, format: "der", type: "spki" });
+    return crypto.verify(null, Buffer.from(message, "utf-8"), keyObject, Buffer.from(signatureB64, "base64"));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -153,6 +178,22 @@ export function startHttpServer(): void {
           return;
         }
 
+        // SECURITY: this endpoint has no on-chain transaction/fee gating
+        // it — that's the whole point (one wallet-signed tx total per
+        // session: start_dig). But that also used to mean ANYONE could
+        // POST any sessionId here and force-settle someone else's dig the
+        // instant its timer elapsed, with no way to prove they were the
+        // session's own player. Confirmed exploitable via a live
+        // adversarial-persona test. Fixed with an off-chain Ed25519
+        // signature (wallet.signMessage, no transaction/fee) proving the
+        // caller actually controls `sessionAccount.player`.
+        if (
+          !verifyOwnerSignature(`mines-dig-reveal:${sessionId.toString()}`, body.signature, sessionAccount.player)
+        ) {
+          sendJson(res, 401, { error: "missing or invalid owner signature" });
+          return;
+        }
+
         const requiredSeconds = digConfigAccount.tierDurations[sessionAccount.durationTier];
         const clusterNow = await getClusterUnixTime(connection);
         const elapsedSeconds = clusterNow - Number(sessionAccount.startTs);
@@ -236,6 +277,41 @@ export function startHttpServer(): void {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/register-round-secret") {
+      try {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+        const roundId = BigInt(body.roundId);
+        const secret = String(body.secret ?? "");
+        if (!secret || secret.length < 16) {
+          sendJson(res, 400, { error: "secret missing or too short" });
+          return;
+        }
+        const key = roundId.toString();
+        if (roundSecrets.has(key)) {
+          // First-write-wins — see the comment above roundSecrets. A
+          // second registration attempt for the same round is either a
+          // (harmless) client retry or someone trying to hijack a round
+          // they didn't start; either way, don't overwrite an existing
+          // claim.
+          sendJson(res, 409, { error: "round already has a registered secret" });
+          return;
+        }
+        const [round] = roundPda(roundId);
+        const roundAccount: any = await (program.account as any).round.fetch(round).catch(() => null);
+        if (!roundAccount || roundAccount.status !== 0) {
+          sendJson(res, 409, { error: "round not active" });
+          return;
+        }
+        roundSecrets.set(key, secret);
+        sendJson(res, 200, { ok: true });
+      } catch (err: any) {
+        sendJson(res, 500, { error: String(err.message ?? err) });
+      }
+      return;
+    }
+
     if (req.method !== "POST" || url.pathname !== "/reveal") {
       sendJson(res, 404, { error: "not found" });
       return;
@@ -253,6 +329,15 @@ export function startHttpServer(): void {
         return;
       }
 
+      // See the roundSecrets comment above /register-round-secret: without
+      // this, roundId alone (a small public sequential counter) was enough
+      // for anyone to force-reveal tiles on someone else's round.
+      const registeredSecret = roundSecrets.get(roundId.toString());
+      if (!registeredSecret || registeredSecret !== String(body.revealSecret ?? "")) {
+        sendJson(res, 403, { error: "missing or invalid revealSecret for this round" });
+        return;
+      }
+
       const [round] = roundPda(roundId);
       const roundAccount: any = await (program.account as any).round.fetch(round);
 
@@ -260,6 +345,20 @@ export function startHttpServer(): void {
         sendJson(res, 409, { error: "round is not active" });
         return;
       }
+
+      // SECURITY: same issue and same fix as /dig-reveal above — this used
+      // to accept a reveal request for ANY active round from anyone, no
+      // proof the caller was that round's own player. That meant any
+      // wallet could force a reveal (and potentially a bust) on someone
+      // else's round without their consent — a real griefing/DoS vector,
+      // confirmed exploitable via a live adversarial-persona test. Fixed
+      // the same way: an off-chain Ed25519 signature over the request,
+      // verified against roundAccount.player.
+      if (!verifyOwnerSignature(`mines-reveal:${roundId.toString()}:${tileIndex}`, body.signature, roundAccount.player)) {
+        sendJson(res, 401, { error: "missing or invalid owner signature" });
+        return;
+      }
+
       const bit = 1 << tileIndex;
       if ((roundAccount.revealedBitmap & bit) !== 0) {
         sendJson(res, 409, { error: "tile already revealed" });
