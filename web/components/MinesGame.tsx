@@ -86,27 +86,46 @@ export function MinesGame() {
     try {
       const [config] = configPda();
       const [vault] = vaultPda();
-      const configAccount = await (program.account as any).config.fetch(config);
-      const newRoundId: bigint = BigInt(configAccount.totalRounds.toString());
-      const [round] = roundPda(newRoundId);
       const [stakingPool] = stakingPoolPda();
       const [rewardVault] = rewardVaultPda();
 
       const seed = Buffer.from(crypto.getRandomValues(new Uint8Array(32)));
       const betLamports = Math.round(Number(betAmount) * 1_000_000_000);
 
-      await program.methods
-        .startRound(new BN(betLamports), mineCount, Array.from(seed))
-        .accounts({
-          player: wallet.publicKey,
-          config,
-          vault,
-          round,
-          stakingPool,
-          rewardVault,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+      // `round`'s PDA is seeded with config.total_rounds read LIVE on-chain
+      // at instruction-execution time (see StartRound in lib.rs), not
+      // anything the client can pin down in advance. Under concurrent play
+      // — another wallet's start_round lands between our read and ours
+      // executing — the counter's already moved on by the time our tx runs,
+      // so the round address we precomputed no longer matches what the
+      // program now expects: AnchorError ConstraintSeeds (2006). Nothing
+      // was spent (the whole instruction reverts), so it's safe to just
+      // re-read the counter and retry — surfaced under the swarm load test
+      // as a real concurrency bug real simultaneous players would also hit.
+      let newRoundId: bigint;
+      for (let attempt = 0; ; attempt++) {
+        const configAccount = await (program.account as any).config.fetch(config);
+        newRoundId = BigInt(configAccount.totalRounds.toString());
+        const [round] = roundPda(newRoundId);
+        try {
+          await program.methods
+            .startRound(new BN(betLamports), mineCount, Array.from(seed))
+            .accounts({
+              player: wallet.publicKey,
+              config,
+              vault,
+              round,
+              stakingPool,
+              rewardVault,
+              systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+          break;
+        } catch (err: any) {
+          const isSeedsRace = String(err.message ?? err).includes("ConstraintSeeds") || String(err.message ?? err).includes("2006");
+          if (!isSeedsRace || attempt >= 4) throw err;
+        }
+      }
 
       setRoundId(newRoundId);
       setClientSeed(seed);

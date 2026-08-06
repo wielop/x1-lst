@@ -302,8 +302,6 @@ export function WykopGame() {
       const [poolXntVault] = poolXntVaultPda();
       const [poolMineVault] = poolMineVaultPda();
       const [poolAuthority] = poolAuthorityPda();
-      const newSessionId: bigint = BigInt(digConfigData.totalSessions.toString());
-      const [session] = digSessionPda(newSessionId);
       const clientSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)));
 
       const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import(
@@ -311,27 +309,51 @@ export function WykopGame() {
       );
       const playerMineAta = getAssociatedTokenAddressSync(digConfigData.mineMint, wallet.publicKey);
 
-      await program.methods
-        .startDig(durationTier, clientSeed)
-        .accounts({
-          player: wallet.publicKey,
-          config,
-          digConfig,
-          vault,
-          session,
-          mineMint: digConfigData.mineMint,
-          playerMineAta,
-          stakingPool,
-          rewardVault,
-          poolXntVault,
-          poolMineVault,
-          liquidityPool,
-          poolAuthority,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+      // `session`'s PDA is seeded with dig_config.total_sessions read LIVE
+      // on-chain at instruction-execution time (see StartDig in lib.rs).
+      // `digConfigData` here is React state that can be seconds stale (it's
+      // only refreshed periodically), so relying on it alone for the id is
+      // an even wider race window than it looks — another wallet's
+      // start_dig landing in between means our precomputed session address
+      // no longer matches what the program now expects: AnchorError
+      // ConstraintSeeds (2006). Nothing was spent (the whole instruction
+      // reverts), so re-fetch the live counter and retry. Surfaced under
+      // the swarm load test as a real concurrency bug real simultaneous
+      // players would also hit.
+      let newSessionId: bigint;
+      for (let attempt = 0; ; attempt++) {
+        const freshDigConfig = attempt === 0 ? digConfigData : await refreshDigConfig();
+        if (!freshDigConfig) throw new Error("dig config unavailable");
+        newSessionId = BigInt(freshDigConfig.totalSessions.toString());
+        const [session] = digSessionPda(newSessionId);
+        try {
+          await program.methods
+            .startDig(durationTier, clientSeed)
+            .accounts({
+              player: wallet.publicKey,
+              config,
+              digConfig,
+              vault,
+              session,
+              mineMint: digConfigData.mineMint,
+              playerMineAta,
+              stakingPool,
+              rewardVault,
+              poolXntVault,
+              poolMineVault,
+              liquidityPool,
+              poolAuthority,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+          break;
+        } catch (err: any) {
+          const isSeedsRace = String(err.message ?? err).includes("ConstraintSeeds") || String(err.message ?? err).includes("2006");
+          if (!isSeedsRace || attempt >= 4) throw err;
+        }
+      }
 
       const duration = digConfigData.tierDurations[durationTier];
       const betAmount = BigInt(digConfigData.tierPrices[durationTier].toString());
